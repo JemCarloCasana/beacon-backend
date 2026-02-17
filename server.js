@@ -4,7 +4,9 @@ import dotenv from "dotenv";
 import morgan from "morgan";
 import deviceRoutes from "./src/routes/deviceRoutes.js";
 import contactRoutes from "./src/routes/contactRoutes.js";
-
+import sosRoutes from "./src/routes/sosRoutes.js";
+import friendRoutes from "./src/routes/friendRoutes.js";
+import publicUserRoutes from "./src/routes/publicUserRoutes.js";
 
 
 import { pool } from "./src/db.js";
@@ -40,6 +42,14 @@ app.use(deviceRoutes);
 // Contact
 app.use(contactRoutes);
 
+// SOS
+app.use(sosRoutes);
+
+// Friends
+app.use(friendRoutes);
+
+// SOS Details
+app.use(publicUserRoutes);
 
 // Start server
 app.listen(process.env.PORT || 3000, () =>
