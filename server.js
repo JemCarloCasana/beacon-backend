@@ -10,7 +10,8 @@ import friendRoutes from "./src/routes/friendRoutes.js";
 import publicUserRoutes from "./src/routes/publicUserRoutes.js";
 import meRoutes from "./src/routes/meRoutes.js";
 import adminAuthRoutes from "./src/routes/adminAuthRoutes.js";
-
+import adminMeRoutes from "./src/routes/adminMeRoutes.js";
+import adminAdminsRoutes from "./src/routes/adminAdminsRoutes.js";
 import { pool } from "./src/db.js";
 
 const app = express();
@@ -49,7 +50,9 @@ app.use(friendRoutes);
 app.use(publicUserRoutes);
 app.use(express.json());
 app.use(adminAuthRoutes);
-
+app.use(express.json());
+app.use(adminMeRoutes);
+app.use(adminAdminsRoutes);
 // 404 fallback (optional but useful)
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
