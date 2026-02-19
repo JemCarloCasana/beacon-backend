@@ -1,0 +1,45 @@
+{
+    "project_name": "Beacon",
+    "architecture": {
+        "android": "Kotlin + MVVM + Navigation Component + MapLibre + Firebase Auth + Firestore",
+        "backend": "Node.js + Express",
+        "database": "PostgreSQL",
+        "authentication": "Firebase ID Token verification via Firebase Admin",
+        "push_notifications": "Firebase Cloud Messaging (FCM)"
+    },
+    "current_phase": "Phase 4 \u2013 Advanced SOS System & Lifecycle Completion",
+    "completed_features": [
+        "Firebase Authentication integration",
+        "/me/bootstrap route with Postgres profile creation",
+        "/devices/register with FCM token upsert logic",
+        "Emergency Contacts CRUD (max 3 primary enforced)",
+        "Friend system (request, accept, list)",
+        "Beacon Code generation and storage",
+        "SOS backend route (/sos) with Postgres event creation",
+        "FCM multicast push to accepted friends",
+        "Android SOS hold-to-trigger flow",
+        "Location-based SOS sending",
+        "Push notification deep link to SosDetailsFragment",
+        "Redesigned SOS Details UI (modern card layout)",
+        "BeaconMessagingService implemented correctly",
+        "Notification tap navigation handling in MainActivity",
+        "Disable SOS until GPS acquired"
+    ],
+    "in_progress": [
+        "Public user endpoint (/users/public/:id) to fetch beacon_code",
+        "Displaying beacon_code in SOS Details screen"
+    ],
+    "next_logical_steps": [
+        "Implement SOS resolution endpoint (PATCH /sos/:id/safe)",
+        "Send push notification back to original sender when marked safe",
+        "Add real-time tracking enhancements (optional)",
+        "Optional in-app SOS banner system"
+    ],
+    "important_decisions": [
+        "Model B SOS logic: Notify accepted Beacon friends only",
+        "Emergency contacts reserved for LGU viewing (not push recipients)",
+        "Devices table upsert by (user_id, platform)",
+        "FCM token uniqueness maintained",
+        "Navigation Component used for all fragment transitions"
+    ]
+}

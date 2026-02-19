@@ -1,57 +1,68 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import morgan from "morgan";
+
 import deviceRoutes from "./src/routes/deviceRoutes.js";
 import contactRoutes from "./src/routes/contactRoutes.js";
 import sosRoutes from "./src/routes/sosRoutes.js";
 import friendRoutes from "./src/routes/friendRoutes.js";
 import publicUserRoutes from "./src/routes/publicUserRoutes.js";
-
+import meRoutes from "./src/routes/meRoutes.js";
+import adminAuthRoutes from "./src/routes/adminAuthRoutes.js";
 
 import { pool } from "./src/db.js";
-import meRoutes from "./src/routes/meRoutes.js";
-
-dotenv.config();
 
 const app = express();
+
+// If behind a proxy (Render/Fly/Heroku/Nginx), keeps req.ip/secure correct
+app.set("trust proxy", 1);
 
 // Request logger (FIRST)
 app.use(morgan("dev"));
 
-//  CORS
+// CORS
 app.use(cors());
 
-//  JSON parser
+// JSON parser
 app.use(express.json({ limit: "2mb" }));
 
 // Health checks
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/health/db", async (req, res) => {
-  const r = await pool.query("SELECT 1 AS ok");
-  res.json({ db: r.rows[0].ok === 1 });
+  try {
+    await pool.query("SELECT 1");
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Database health check failed:", err?.message || err);
+    res.status(503).json({ ok: false, error: err?.message || String(err) });
+  }
 });
 
-//  Routes
+// Routes
 app.use(meRoutes);
-
-// Device
 app.use(deviceRoutes);
-
-// Contact
 app.use(contactRoutes);
-
-// SOS
 app.use(sosRoutes);
-
-// Friends
 app.use(friendRoutes);
-
-// SOS Details
 app.use(publicUserRoutes);
+app.use(express.json());
+app.use(adminAuthRoutes);
+
+// 404 fallback (optional but useful)
+app.use((req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
+
+// Error handler (optional but useful)
+app.use((err, req, res, next) => {
+  console.error("[unhandled error]", err);
+  res.status(500).json({ error: "Internal server error" });
+});
 
 // Start server
-app.listen(process.env.PORT || 3000, () =>
-  console.log(`API running on http://localhost:${process.env.PORT || 3000}`)
-);
+const PORT = Number(process.env.PORT || 3000);
+app.listen(PORT, () => {
+  console.log(`API running on http://localhost:${PORT}`);
+});
