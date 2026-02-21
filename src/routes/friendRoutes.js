@@ -36,7 +36,7 @@ router.post("/friends/request", requireAuth, async (req, res) => {
 
   // Already friends?
   const friendCheck = await pool.query(
-    `SELECT 1 FROM friendships WHERE user_id = $1 AND friend_user_id = $2`,
+    `SELECT 1 FROM public.friendships WHERE user_id = $1 AND friend_user_id = $2`,
     [myId, targetId]
   );
   if (friendCheck.rowCount > 0) return res.status(409).json({ message: "Already friends" });
@@ -143,14 +143,14 @@ router.post("/friends/requests/:id/accept", requireAuth, async (req, res) => {
 
     // Friendships both directions (idempotent)
     await client.query(
-      `INSERT INTO friendships (user_id, friend_user_id)
+      `INSERT INTO public.friendships (user_id, friend_user_id)
        VALUES ($1, $2)
        ON CONFLICT DO NOTHING`,
       [requesterId, addresseeId]
     );
 
     await client.query(
-      `INSERT INTO friendships (user_id, friend_user_id)
+      `INSERT INTO public.friendships (user_id, friend_user_id)
        VALUES ($1, $2)
        ON CONFLICT DO NOTHING`,
       [addresseeId, requesterId]
@@ -195,6 +195,72 @@ router.post("/friends/requests/:id/reject", requireAuth, async (req, res) => {
 });
 
 /**
+ * DELETE /friends/:id
+ * Removes friendship both directions for the current user and target friend.
+ */
+router.delete("/friends/:id", requireAuth, async (req, res) => {
+  const { uid } = req.auth;
+  const friendId = Number(req.params.id);
+
+  if (!Number.isFinite(friendId)) return res.status(400).json({ message: "Invalid friend id" });
+
+  const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
+  if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
+  const myId = meRes.rows[0].id;
+
+  if (myId === friendId) return res.status(400).json({ message: "Cannot remove yourself" });
+
+  const r = await pool.query(
+    `DELETE FROM public.friendships
+     WHERE (user_id = $1 AND friend_user_id = $2)
+        OR (user_id = $2 AND friend_user_id = $1)
+     RETURNING user_id, friend_user_id`,
+    [myId, friendId]
+  );
+
+  if (r.rowCount === 0) return res.status(404).json({ message: "Friendship not found" });
+
+  res.json({ ok: true });
+});
+
+/**
+ * GET /friends/search?q=...
+ * Searches accepted friends for the current user by name, email, phone, or beacon code.
+ */
+router.get("/friends/search", requireAuth, async (req, res) => {
+  const { uid } = req.auth;
+  const q = String(req.query.q ?? "").trim();
+
+  if (!q) return res.status(400).json({ message: "Missing search query" });
+
+  const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
+  if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
+  const myId = meRes.rows[0].id;
+
+  const search = `%${q}%`;
+  const r = await pool.query(
+    `SELECT u.id,
+            u.full_name,
+            u.email,
+            u.phone_number,
+            u.beacon_code
+     FROM public.friendships f
+     JOIN users u ON u.id = f.friend_user_id
+     WHERE f.user_id = $1
+       AND (
+         u.full_name ILIKE $2
+         OR u.email ILIKE $2
+         OR u.phone_number ILIKE $2
+         OR u.beacon_code ILIKE $2
+       )
+     ORDER BY u.full_name ASC`,
+    [myId, search]
+  );
+
+  res.json(r.rows);
+});
+
+/**
  * GET /friends
  * Lists accepted friends for the current user.
  */
@@ -211,7 +277,7 @@ router.get("/friends", requireAuth, async (req, res) => {
             u.email,
             u.phone_number,
             u.beacon_code
-     FROM friendships f
+     FROM public.friendships f
      JOIN users u ON u.id = f.friend_user_id
      WHERE f.user_id = $1
      ORDER BY u.full_name ASC`,
