@@ -1,0 +1,241 @@
+openapi: 3.0.3
+info:
+  title: Beacon Backend API
+  version: 1.0.0
+paths:
+  /me:
+    get:
+      summary: Get current authenticated user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UserDto"
+                  - type: object
+                    properties:
+                      beacon_code:
+                        type: string
+                        nullable: true
+                      created_at:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      updated_at:
+                        type: string
+                        format: date-time
+                        nullable: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      summary: Update current authenticated user profile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchMeRequest"
+      responses:
+        "200":
+          description: Updated user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDto"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /users:
+    get:
+      summary: Get current authenticated user (compatibility alias)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UserDto"
+                  - type: object
+                    properties:
+                      beacon_code:
+                        type: string
+                        nullable: true
+                      created_at:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      updated_at:
+                        type: string
+                        format: date-time
+                        nullable: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /admin/users/{id}:
+    patch:
+      summary: Admin updates a user profile by user id
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminPatchUserRequest"
+      responses:
+        "200":
+          description: Updated user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    UserDto:
+      type: object
+      required:
+        - id
+        - firebase_uid
+        - email
+        - full_name
+        - role
+      properties:
+        id:
+          type: integer
+        firebase_uid:
+          type: string
+        email:
+          type: string
+          format: email
+          nullable: true
+        full_name:
+          type: string
+        phone_number:
+          type: string
+          nullable: true
+        role:
+          type: string
+        profile_image_url:
+          type: string
+          format: uri
+          nullable: true
+    PatchMeRequest:
+      type: object
+      properties:
+        full_name:
+          type: string
+          minLength: 2
+          maxLength: 50
+        email:
+          type: string
+          format: email
+        phone_number:
+          type: string
+          pattern: "^\\+?\\d{10,20}$"
+        profile_image_url:
+          type: string
+          format: uri
+          nullable: true
+    AdminPatchUserRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        full_name:
+          type: string
+          minLength: 2
+          maxLength: 50
+        email:
+          type: string
+          format: email
+      minProperties: 1
+    ValidationErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: User not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Resource conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationErrorResponse"

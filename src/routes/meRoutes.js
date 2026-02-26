@@ -6,6 +6,20 @@ const router = express.Router();
 
 // ✅ Phone validation + normalization (PH)
 const PHONE_REGEX = /^(?:\+63|0)\d{10}$/;
+const PATCH_PHONE_REGEX = /^\+?\d{10,20}$/;
+const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USER_SELECT_FIELDS = `
+  id,
+  firebase_uid,
+  email,
+  full_name,
+  phone_number,
+  role,
+  profile_image_url,
+  beacon_code,
+  created_at,
+  updated_at
+`;
 
 function normalizePH(phone) {
   if (!phone) return null;
@@ -30,6 +44,68 @@ async function createUniqueBeaconCode(client) {
     if (exists.rowCount === 0) return code;
   }
   throw new Error("Failed to generate unique beacon code");
+}
+
+function userToDto(row) {
+  return {
+    id: row.id,
+    firebase_uid: row.firebase_uid,
+    email: row.email,
+    full_name: row.full_name,
+    phone_number: row.phone_number,
+    role: row.role,
+    profile_image_url: row.profile_image_url ?? null
+  };
+}
+
+function validateOptionalEmail(email) {
+  if (email == null) return null;
+  if (typeof email !== "string" || !SIMPLE_EMAIL_REGEX.test(email.trim())) {
+    throw new Error("Invalid email");
+  }
+  return email.trim().toLowerCase();
+}
+
+function validateOptionalFullName(fullName) {
+  if (fullName == null) return null;
+  if (typeof fullName !== "string") {
+    throw new Error("Invalid full_name");
+  }
+  const normalized = fullName.trim();
+  if (normalized.length < 2 || normalized.length > 50) {
+    throw new Error("Invalid full_name");
+  }
+  return normalized;
+}
+
+function validateOptionalPatchPhone(phoneNumber) {
+  if (phoneNumber == null) return null;
+  if (typeof phoneNumber !== "string") {
+    throw new Error("Invalid phone_number");
+  }
+  const normalized = phoneNumber.trim();
+  if (!PATCH_PHONE_REGEX.test(normalized)) {
+    throw new Error("Invalid phone_number");
+  }
+  return normalized;
+}
+
+function validateOptionalProfileImageUrl(profileImageUrl) {
+  if (profileImageUrl == null) return null;
+  if (typeof profileImageUrl !== "string" || !profileImageUrl.trim()) {
+    throw new Error("Invalid profile_image_url");
+  }
+  const normalized = profileImageUrl.trim();
+  let parsed;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error("Invalid profile_image_url");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Invalid profile_image_url");
+  }
+  return normalized;
 }
 
 /**
@@ -88,7 +164,7 @@ router.post("/me/bootstrap", requireAuth, async (req, res) => {
          phone_number = EXCLUDED.phone_number,
          beacon_code = COALESCE(users.beacon_code, EXCLUDED.beacon_code),
          updated_at = NOW()
-       RETURNING id, firebase_uid, email, full_name, phone_number, beacon_code, role, created_at, updated_at`,
+       RETURNING ${USER_SELECT_FIELDS}`,
       [uid, email, full_name.trim(), normalizedPhone, beaconCode]
     );
 
@@ -117,7 +193,98 @@ router.get("/me", requireAuth, async (req, res) => {
   const { uid } = req.auth;
 
   const result = await pool.query(
-    `SELECT id, firebase_uid, email, full_name, phone_number, beacon_code, role, created_at, updated_at
+    `SELECT ${USER_SELECT_FIELDS}
+     FROM users
+     WHERE firebase_uid = $1`,
+    [uid]
+  );
+
+  if (result.rowCount === 0) {
+    return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
+  }
+
+  return res.json(result.rows[0]);
+});
+
+/**
+ * PATCH /me
+ * Partially updates current authenticated user's profile.
+ */
+router.patch("/me", requireAuth, async (req, res) => {
+  const { uid } = req.auth;
+  const { full_name, email, phone_number, profile_image_url } = req.body || {};
+
+  let normalizedFullName;
+  let normalizedEmail;
+  let normalizedPhoneNumber;
+  let normalizedProfileImageUrl;
+
+  try {
+    normalizedFullName = validateOptionalFullName(full_name);
+    normalizedEmail = validateOptionalEmail(email);
+    normalizedPhoneNumber = validateOptionalPatchPhone(phone_number);
+    normalizedProfileImageUrl = validateOptionalProfileImageUrl(profile_image_url);
+  } catch (err) {
+    return res.status(400).json({ message: err?.message || "Invalid request body" });
+  }
+
+  const updates = [];
+  const values = [];
+
+  if (full_name != null) {
+    updates.push(`full_name = $${values.length + 1}`);
+    values.push(normalizedFullName);
+  }
+  if (email != null) {
+    updates.push(`email = $${values.length + 1}`);
+    values.push(normalizedEmail);
+  }
+  if (phone_number != null) {
+    updates.push(`phone_number = $${values.length + 1}`);
+    values.push(normalizedPhoneNumber);
+  }
+  if (profile_image_url != null) {
+    updates.push(`profile_image_url = $${values.length + 1}`);
+    values.push(normalizedProfileImageUrl);
+  }
+
+  let result;
+
+  if (updates.length > 0) {
+    values.push(uid);
+    result = await pool.query(
+      `UPDATE users
+       SET ${updates.join(", ")}, updated_at = NOW()
+       WHERE firebase_uid = $${values.length}
+       RETURNING ${USER_SELECT_FIELDS}`,
+      values
+    );
+  } else {
+    result = await pool.query(
+      `SELECT ${USER_SELECT_FIELDS}
+       FROM users
+       WHERE firebase_uid = $1`,
+      [uid]
+    );
+  }
+
+  if (result.rowCount === 0) {
+    return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
+  }
+
+  return res.json(userToDto(result.rows[0]));
+});
+
+/**
+ * GET /users
+ * Compatibility alias for clients expecting this route for current profile.
+ * Requires Bearer auth and returns the authenticated user's profile.
+ */
+router.get("/users", requireAuth, async (req, res) => {
+  const { uid } = req.auth;
+
+  const result = await pool.query(
+    `SELECT ${USER_SELECT_FIELDS}
      FROM users
      WHERE firebase_uid = $1`,
     [uid]

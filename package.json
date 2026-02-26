@@ -11,7 +11,8 @@
   "scripts": {
     "dev": "node --watch server.js",
     "start": "node server.js",
-    "start:prod": "NODE_ENV=production node server.js"
+    "start:prod": "NODE_ENV=production node server.js",
+    "test": "node src/meRoutes.patch.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js"
   },
   "keywords": [
     "beacon",

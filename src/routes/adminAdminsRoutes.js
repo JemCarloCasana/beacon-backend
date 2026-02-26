@@ -4,6 +4,123 @@ import { pool } from "../db.js";
 import { requireAuth, requirePermission } from "../middleware/adminAuth.js"; // ✅ FIXED
 
 const router = express.Router();
+const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ADMIN_USER_PATCH_ALLOWED_FIELDS = ["full_name", "email"];
+const ADMIN_ACCOUNT_PATCH_ALLOWED_FIELDS = ["full_name", "email"];
+const ADMIN_USER_RETURN_FIELDS = `
+  id,
+  firebase_uid,
+  email,
+  full_name,
+  phone_number,
+  role,
+  profile_image_url
+`;
+
+function buildValidationError(errors) {
+  return { message: "Validation failed", errors };
+}
+
+function addFieldError(errors, field, message) {
+  if (!errors[field]) {
+    errors[field] = [];
+  }
+  errors[field].push(message);
+}
+
+function validateAdminUserPatchPayload(body) {
+  const errors = {};
+  const normalized = {};
+  const payload = body && typeof body === "object" ? body : {};
+  const keys = Object.keys(payload);
+
+  for (const key of keys) {
+    if (!ADMIN_USER_PATCH_ALLOWED_FIELDS.includes(key)) {
+      addFieldError(errors, key, "Field is not allowed");
+    }
+  }
+
+  if (!ADMIN_USER_PATCH_ALLOWED_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
+    addFieldError(errors, "body", "At least one of full_name or email is required");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "full_name")) {
+    const fullName = payload.full_name;
+    if (typeof fullName !== "string") {
+      addFieldError(errors, "full_name", "Must be a string");
+    } else {
+      const trimmed = fullName.trim();
+      if (trimmed.length < 2 || trimmed.length > 50) {
+        addFieldError(errors, "full_name", "Must be between 2 and 50 characters");
+      } else {
+        normalized.full_name = trimmed;
+      }
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "email")) {
+    const email = payload.email;
+    if (typeof email !== "string") {
+      addFieldError(errors, "email", "Must be a string");
+    } else {
+      const normalizedEmail = email.trim().toLowerCase();
+      if (!SIMPLE_EMAIL_REGEX.test(normalizedEmail)) {
+        addFieldError(errors, "email", "Invalid email format");
+      } else {
+        normalized.email = normalizedEmail;
+      }
+    }
+  }
+
+  return { normalized, errors };
+}
+
+function validateAdminAccountPatchPayload(body) {
+  const errors = {};
+  const normalized = {};
+  const payload = body && typeof body === "object" ? body : {};
+  const keys = Object.keys(payload);
+
+  for (const key of keys) {
+    if (!ADMIN_ACCOUNT_PATCH_ALLOWED_FIELDS.includes(key)) {
+      addFieldError(errors, key, "Field is not allowed");
+    }
+  }
+
+  if (!ADMIN_ACCOUNT_PATCH_ALLOWED_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
+    addFieldError(errors, "body", "At least one of full_name or email is required");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "full_name")) {
+    const fullName = payload.full_name;
+    if (typeof fullName !== "string") {
+      addFieldError(errors, "full_name", "Must be a string");
+    } else {
+      const trimmed = fullName.trim();
+      if (trimmed.length < 2 || trimmed.length > 50) {
+        addFieldError(errors, "full_name", "Must be between 2 and 50 characters");
+      } else {
+        normalized.full_name = trimmed;
+      }
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "email")) {
+    const email = payload.email;
+    if (typeof email !== "string") {
+      addFieldError(errors, "email", "Must be a string");
+    } else {
+      const normalizedEmail = email.trim().toLowerCase();
+      if (!SIMPLE_EMAIL_REGEX.test(normalizedEmail)) {
+        addFieldError(errors, "email", "Invalid email format");
+      } else {
+        normalized.email = normalizedEmail;
+      }
+    }
+  }
+
+  return { normalized, errors };
+}
 
 /**
  * GET /admin/admins
@@ -26,6 +143,177 @@ router.get(
       return res.json(result.rows);
     } catch (err) {
       console.error("GET /admin/admins error:", err); // ✅ IMPORTANT
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+/**
+ * PATCH /admin/users/:id
+ * Admin-only partial update for mobile users.
+ */
+router.patch(
+  "/admin/users/:id",
+  requireAuth,
+  requirePermission("manage_users"),
+  async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return res.status(422).json(
+          buildValidationError({
+            id: ["Must be a positive integer"],
+          })
+        );
+      }
+
+      const { normalized, errors } = validateAdminUserPatchPayload(req.body);
+      if (Object.keys(errors).length > 0) {
+        return res.status(422).json(buildValidationError(errors));
+      }
+
+      const updates = [];
+      const values = [];
+
+      if (Object.prototype.hasOwnProperty.call(normalized, "full_name")) {
+        values.push(normalized.full_name);
+        updates.push(`full_name = $${values.length}`);
+      }
+      if (Object.prototype.hasOwnProperty.call(normalized, "email")) {
+        values.push(normalized.email);
+        updates.push(`email = $${values.length}`);
+      }
+
+      values.push(userId);
+      const result = await pool.query(
+        `
+        UPDATE users
+        SET ${updates.join(", ")}, updated_at = NOW()
+        WHERE id = $${values.length}
+        RETURNING ${ADMIN_USER_RETURN_FIELDS}
+        `,
+        values
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      return res.json(result.rows[0]);
+    } catch (err) {
+      if (err?.code === "23505") {
+        return res.status(409).json({ message: "Email already exists" });
+      }
+      console.error("PATCH /admin/users/:id error:", err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+/**
+ * PATCH /admin/admins/:id
+ * Admin-only partial update for admin/personnel accounts.
+ */
+router.patch(
+  "/admin/admins/:id",
+  requireAuth,
+  requirePermission("manage_admins"),
+  async (req, res) => {
+    try {
+      const adminId = Number(req.params.id);
+      if (!Number.isInteger(adminId) || adminId <= 0) {
+        return res.status(422).json(
+          buildValidationError({
+            id: ["Must be a positive integer"],
+          })
+        );
+      }
+
+      const { normalized, errors } = validateAdminAccountPatchPayload(req.body);
+      if (Object.keys(errors).length > 0) {
+        return res.status(422).json(buildValidationError(errors));
+      }
+
+      const updates = [];
+      const values = [];
+
+      if (Object.prototype.hasOwnProperty.call(normalized, "full_name")) {
+        values.push(normalized.full_name);
+        updates.push(`full_name = $${values.length}`);
+      }
+      if (Object.prototype.hasOwnProperty.call(normalized, "email")) {
+        values.push(normalized.email);
+        updates.push(`email = $${values.length}`);
+      }
+
+      values.push(adminId);
+      const result = await pool.query(
+        `
+        UPDATE admins
+        SET ${updates.join(", ")}
+        WHERE id = $${values.length}
+        RETURNING id, email, full_name, role_id, created_at
+        `,
+        values
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ message: "Admin not found" });
+      }
+
+      return res.json(result.rows[0]);
+    } catch (err) {
+      if (err?.code === "23505") {
+        return res.status(409).json({ message: "Email already exists" });
+      }
+      console.error("PATCH /admin/admins/:id error:", err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+/**
+ * DELETE /admin/admins/:id
+ * Deletes an admin/personnel account by id.
+ */
+router.delete(
+  "/admin/admins/:id",
+  requireAuth,
+  requirePermission("manage_admins"),
+  async (req, res) => {
+    try {
+      const targetAdminId = Number(req.params.id);
+      const requestingAdminId = Number(req.admin?.adminId);
+
+      if (!Number.isInteger(targetAdminId) || targetAdminId <= 0) {
+        return res.status(400).json({ message: "Invalid admin id" });
+      }
+      if (!Number.isInteger(requestingAdminId) || requestingAdminId <= 0) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+      if (targetAdminId === requestingAdminId) {
+        return res.status(409).json({ message: "You cannot delete your own account" });
+      }
+
+      const deleteResult = await pool.query(
+        `
+        DELETE FROM admins
+        WHERE id = $1
+        RETURNING id, email, full_name, role_id, created_at
+        `,
+        [targetAdminId]
+      );
+
+      if (deleteResult.rowCount === 0) {
+        return res.status(404).json({ message: "Admin not found" });
+      }
+
+      return res.json({
+        message: "Admin deleted successfully",
+        admin: deleteResult.rows[0],
+      });
+    } catch (err) {
+      console.error("DELETE /admin/admins/:id error:", err);
       return res.status(500).json({ message: "Server error" });
     }
   }
