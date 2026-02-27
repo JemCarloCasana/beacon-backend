@@ -1,6 +1,6 @@
 import express from "express";
 import { pool } from "../db.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAppAuth } from "../middleware/requireAppAuth.js";
 
 const router = express.Router();
 
@@ -12,7 +12,7 @@ function normalizeBeaconCode(code) {
  * POST /friends/request
  * Body: { beacon_code }
  */
-router.post("/friends/request", requireAuth, async (req, res) => {
+router.post("/friends/request", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const { beacon_code } = req.body;
 
@@ -61,7 +61,7 @@ router.post("/friends/request", requireAuth, async (req, res) => {
  * GET /friends/requests/incoming
  * Lists pending requests sent to me.
  */
-router.get("/friends/requests/incoming", requireAuth, async (req, res) => {
+router.get("/friends/requests/incoming", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
 
   const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
@@ -90,7 +90,7 @@ router.get("/friends/requests/incoming", requireAuth, async (req, res) => {
  * POST /friends/requests/:id/accept
  * Accept a request (must be addressee) and create friendships both directions.
  */
-router.post("/friends/requests/:id/accept", requireAuth, async (req, res) => {
+router.post("/friends/requests/:id/accept", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const requestId = Number(req.params.id);
 
@@ -171,7 +171,7 @@ router.post("/friends/requests/:id/accept", requireAuth, async (req, res) => {
  * POST /friends/requests/:id/reject
  * Reject a request (must be addressee).
  */
-router.post("/friends/requests/:id/reject", requireAuth, async (req, res) => {
+router.post("/friends/requests/:id/reject", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const requestId = Number(req.params.id);
 
@@ -198,7 +198,7 @@ router.post("/friends/requests/:id/reject", requireAuth, async (req, res) => {
  * DELETE /friends/:id
  * Removes friendship both directions for the current user and target friend.
  */
-router.delete("/friends/:id", requireAuth, async (req, res) => {
+router.delete("/friends/:id", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const friendId = Number(req.params.id);
 
@@ -227,7 +227,7 @@ router.delete("/friends/:id", requireAuth, async (req, res) => {
  * GET /friends/search?q=...
  * Searches accepted friends for the current user by name, email, phone, or beacon code.
  */
-router.get("/friends/search", requireAuth, async (req, res) => {
+router.get("/friends/search", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const q = String(req.query.q ?? "").trim();
 
@@ -264,7 +264,7 @@ router.get("/friends/search", requireAuth, async (req, res) => {
  * GET /friends
  * Lists accepted friends for the current user.
  */
-router.get("/friends", requireAuth, async (req, res) => {
+router.get("/friends", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
 
   const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);

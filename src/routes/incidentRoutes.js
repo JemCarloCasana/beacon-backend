@@ -1,6 +1,6 @@
 import express from "express";
 import { pool } from "../db.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAppAuth } from "../middleware/requireAppAuth.js";
 
 const router = express.Router();
 const MAX_IMAGES_PER_INCIDENT = 5;
@@ -107,7 +107,7 @@ function parseImageInput(value) {
  *   images?: ["data:image/jpeg;base64,..."] | ["<plain-base64>"]
  * }
  */
-router.post("/incidents", requireAuth, async (req, res) => {
+router.post("/incidents", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const { incident_type, description, latitude, longitude, address, images } = req.body;
 

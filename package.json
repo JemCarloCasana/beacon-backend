@@ -12,7 +12,7 @@
     "dev": "node --watch server.js",
     "start": "node server.js",
     "start:prod": "NODE_ENV=production node server.js",
-    "test": "node src/meRoutes.patch.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js"
+    "test": "node src/meRoutes.patch.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js && node src/broadcastRoutes.auth.test.js && node src/requireAuth.middleware.test.js"
   },
   "keywords": [
     "beacon",

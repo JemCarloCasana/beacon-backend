@@ -1,17 +1,28 @@
 import admin from "firebase-admin";
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+function buildCredential() {
+  const inlineServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (inlineServiceAccount) {
+    const parsed = JSON.parse(inlineServiceAccount);
+    return admin.credential.cert(parsed);
+  }
 
-// serviceAccountKey.json is in project root: beacon-backend/serviceAccountKey.json
-const serviceAccountPath = path.join(__dirname, "..", "serviceAccountKey.json");
-const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, "utf8"));
+  const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+  if (serviceAccountPath) {
+    const raw = fs.readFileSync(serviceAccountPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return admin.credential.cert(parsed);
+  }
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+  return admin.credential.applicationDefault();
+}
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: buildCredential(),
+    projectId: process.env.FIREBASE_PROJECT_ID || undefined
+  });
+}
 
 export default admin;

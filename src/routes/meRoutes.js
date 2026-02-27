@@ -1,6 +1,6 @@
 import express from "express";
 import { pool } from "../db.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAppAuth } from "../middleware/requireAppAuth.js";
 
 const router = express.Router();
 
@@ -115,7 +115,7 @@ function validateOptionalProfileImageUrl(profileImageUrl) {
  *
  * Adds: beacon_code (generated once)
  */
-router.post("/me/bootstrap", requireAuth, async (req, res) => {
+router.post("/me/bootstrap", requireAppAuth, async (req, res) => {
   const client = await pool.connect();
   try {
     const { uid, email } = req.auth;
@@ -189,7 +189,7 @@ router.post("/me/bootstrap", requireAuth, async (req, res) => {
  * GET /me
  * Returns the Postgres user profile for the current Firebase user.
  */
-router.get("/me", requireAuth, async (req, res) => {
+router.get("/me", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
 
   const result = await pool.query(
@@ -210,7 +210,7 @@ router.get("/me", requireAuth, async (req, res) => {
  * PATCH /me
  * Partially updates current authenticated user's profile.
  */
-router.patch("/me", requireAuth, async (req, res) => {
+router.patch("/me", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const { full_name, email, phone_number, profile_image_url } = req.body || {};
 
@@ -280,7 +280,7 @@ router.patch("/me", requireAuth, async (req, res) => {
  * Compatibility alias for clients expecting this route for current profile.
  * Requires Bearer auth and returns the authenticated user's profile.
  */
-router.get("/users", requireAuth, async (req, res) => {
+router.get("/users", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
 
   const result = await pool.query(

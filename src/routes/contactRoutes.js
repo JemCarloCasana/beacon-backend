@@ -1,6 +1,6 @@
 import express from "express";
 import { pool } from "../db.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAppAuth } from "../middleware/requireAppAuth.js";
 
 const router = express.Router();
 
@@ -26,7 +26,7 @@ async function getUserIdByFirebaseUid(uid) {
  * GET /contacts
  * Returns ALL contacts for logged-in user, including relation + is_primary.
  */
-router.get("/contacts", requireAuth, async (req, res) => {
+router.get("/contacts", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
 
   const userId = await getUserIdByFirebaseUid(uid);
@@ -47,7 +47,7 @@ router.get("/contacts", requireAuth, async (req, res) => {
  * POST /contacts
  * Body: { contact_name, phone_number, relation?, is_primary? }
  */
-router.post("/contacts", requireAuth, async (req, res) => {
+router.post("/contacts", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const { contact_name, phone_number, relation, is_primary } = req.body;
 
@@ -91,7 +91,7 @@ router.post("/contacts", requireAuth, async (req, res) => {
  * PATCH /contacts/:id
  * Body: { contact_name, phone_number, relation? }
  */
-router.patch("/contacts/:id", requireAuth, async (req, res) => {
+router.patch("/contacts/:id", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const contactId = Number(req.params.id);
 
@@ -142,7 +142,7 @@ router.patch("/contacts/:id", requireAuth, async (req, res) => {
  * Body: { is_primary: boolean }
  * Sets/unsets primary status.
  */
-router.patch("/contacts/:id/primary", requireAuth, async (req, res) => {
+router.patch("/contacts/:id/primary", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const contactId = Number(req.params.id);
 
@@ -182,7 +182,7 @@ router.patch("/contacts/:id/primary", requireAuth, async (req, res) => {
 /**
  * DELETE /contacts/:id
  */
-router.delete("/contacts/:id", requireAuth, async (req, res) => {
+router.delete("/contacts/:id", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const contactId = Number(req.params.id);
 

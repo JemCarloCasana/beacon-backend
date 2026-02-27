@@ -1,6 +1,6 @@
 import express from "express";
 import { pool } from "../db.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import admin from "../firebaseAdmin.js"; // ✅ use your initialized admin
 
 const router = express.Router();
@@ -13,7 +13,7 @@ const router = express.Router();
  * - Notify accepted Beacon friends (friendships)
  * - Emergency contacts are for LGU viewing, not push recipients
  */
-router.post("/sos", requireAuth, async (req, res) => {
+router.post("/sos", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const { latitude, longitude, address, message } = req.body;
 

@@ -1,25 +1,28 @@
 import express from "express";
 import { pool } from "../db.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+import { requireAppAuth } from "../middleware/requireAppAuth.js";
 
 const router = express.Router();
 
-router.post("/devices/register", requireAuth, async (req, res) => {
+router.post("/devices/register", requireAppAuth, async (req, res) => {
   const client = await pool.connect();
+
   try {
     const { uid } = req.auth;
-    const { fcm_token, platform } = req.body;
+    const incomingToken = req.body?.token ?? req.body?.fcm_token;
+    const platform = typeof req.body?.platform === "string" && req.body.platform.trim()
+      ? req.body.platform.trim()
+      : "android";
 
-    if (!fcm_token || typeof fcm_token !== "string" || fcm_token.length < 20) {
-      return res.status(400).json({ message: "Invalid fcm_token" });
+    if (!incomingToken || typeof incomingToken !== "string") {
+      return res.status(400).json({ message: "token is required" });
     }
 
-    const plat =
-      typeof platform === "string" && platform.trim()
-        ? platform.trim()
-        : "android";
+    const token = incomingToken.trim();
+    if (token.length < 20) {
+      return res.status(400).json({ message: "Invalid token" });
+    }
 
-    // Find user in Postgres
     const userRes = await client.query(
       "SELECT id FROM users WHERE firebase_uid = $1",
       [uid]
@@ -33,38 +36,36 @@ router.post("/devices/register", requireAuth, async (req, res) => {
 
     await client.query("BEGIN");
 
-    // ✅ 1) Remove token from any old record (prevents UNIQUE token crash)
     await client.query(
-      `DELETE FROM devices
-       WHERE fcm_token = $1`,
-      [fcm_token]
+      `
+      DELETE FROM devices
+      WHERE fcm_token = $1
+      `,
+      [token]
     );
 
-    // ✅ 2) Upsert by (user_id, platform)
-    const result = await client.query(
-      `INSERT INTO devices (user_id, fcm_token, platform)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (user_id, platform)
-       DO UPDATE SET
-         fcm_token = EXCLUDED.fcm_token,
-         updated_at = NOW()
-       RETURNING id, user_id, fcm_token, platform, created_at, updated_at`,
-      [userId, fcm_token, plat]
+    await client.query(
+      `
+      INSERT INTO devices (user_id, fcm_token, platform)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (user_id, platform)
+      DO UPDATE SET
+        fcm_token = EXCLUDED.fcm_token,
+        updated_at = NOW()
+      `,
+      [userId, token, platform]
     );
 
     await client.query("COMMIT");
-    res.json(result.rows[0]);
 
+    return res.json({ ok: true });
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch {}
-    console.error("DEVICES_REGISTER ERROR:", err);
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
 
-    // nicer response for unique errors
-    if (err?.code === "23505") {
-      return res.status(409).json({ message: "Device token conflict. Try again." });
-    }
-
-    res.status(500).json({ message: "Server error" });
+    console.error("devices/register error:", err);
+    return res.status(500).json({ message: "Server error" });
   } finally {
     client.release();
   }
