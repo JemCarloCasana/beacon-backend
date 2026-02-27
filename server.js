@@ -15,9 +15,11 @@ import adminAdminsRoutes from "./src/routes/adminAdminsRoutes.js";
 import incidentRoutes from "./src/routes/incidentRoutes.js";
 import broadcastRoutes from "./src/routes/broadcastRoutes.js";
 import adminBroadcastRoutes from "./src/routes/adminBroadcastRoutes.js";
+import adminSosRoutes from "./src/routes/adminSosRoutes.js";
 import { pool } from "./src/db.js";
 import { createRateLimiter } from "./src/middleware/rateLimit.js";
 import { getAuthMetricsSnapshot } from "./src/utils/authMetrics.js";
+import { getSosStreamMetrics } from "./src/services/sosLiveOps.js";
 
 const app = express();
 
@@ -87,7 +89,11 @@ app.get("/health/db", async (req, res) => {
 });
 
 app.get("/health/auth-metrics", (req, res) => {
-  return res.json({ ok: true, metrics: getAuthMetricsSnapshot() });
+  return res.json({
+    ok: true,
+    metrics: getAuthMetricsSnapshot(),
+    sos: getSosStreamMetrics()
+  });
 });
 
 // Auth-sensitive rate limits
@@ -110,6 +116,7 @@ app.use(adminAdminsRoutes);
 app.use(incidentRoutes);
 app.use(broadcastRoutes);
 app.use(adminBroadcastRoutes);
+app.use(adminSosRoutes);
 
 // 404 fallback (optional but useful)
 app.use((req, res) => {
@@ -127,3 +134,6 @@ const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
   console.log(`API running on http://localhost:${PORT}`);
 });
+
+
+

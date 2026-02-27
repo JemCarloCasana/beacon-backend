@@ -1,6 +1,7 @@
 import express from "express";
 import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
+import { requireAdminAuth } from "../middleware/adminAuth.js";
 
 const router = express.Router();
 const MAX_IMAGES_PER_INCIDENT = 5;
@@ -96,6 +97,49 @@ function parseImageInput(value) {
   };
 }
 
+
+router.get("/admin/incidents", requireAdminAuth, async (req, res) => {
+  try {
+    const status = typeof req.query?.status === "string" ? req.query.status.trim().toLowerCase() : "";
+    const values = [];
+    let whereClause = "";
+
+    if (status) {
+      values.push(status);
+      whereClause = `WHERE ir.status = $${values.length}`;
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        ir.id,
+        ir.user_id,
+        ir.incident_type,
+        ir.description,
+        ir.latitude,
+        ir.longitude,
+        ir.address,
+        ir.status,
+        ir.created_at,
+        COALESCE(img.images_count, 0) AS images_count
+      FROM incident_reports ir
+      LEFT JOIN (
+        SELECT incident_report_id, COUNT(*)::int AS images_count
+        FROM incident_report_images
+        GROUP BY incident_report_id
+      ) img ON img.incident_report_id = ir.id
+      ${whereClause}
+      ORDER BY ir.created_at DESC, ir.id DESC
+      `,
+      values
+    );
+
+    return res.json(result.rows);
+  } catch (err) {
+    console.error("GET /admin/incidents error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
 /**
  * POST /incidents
  * Body: {
@@ -196,3 +240,5 @@ router.post("/incidents", requireAppAuth, async (req, res) => {
 });
 
 export default router;
+
+

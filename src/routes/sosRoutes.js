@@ -1,23 +1,15 @@
 import express from "express";
 import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
-import admin from "../firebaseAdmin.js"; // ✅ use your initialized admin
+import admin from "../firebaseAdmin.js";
+import { publishSosDeltaBySosId } from "../services/sosLiveOps.js";
 
 const router = express.Router();
 
-/**
- * POST /sos
- * Body: { latitude, longitude, address, message }
- *
- * Model B:
- * - Notify accepted Beacon friends (friendships)
- * - Emergency contacts are for LGU viewing, not push recipients
- */
 router.post("/sos", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
   const { latitude, longitude, address, message } = req.body;
 
-  // Validation
   if (latitude != null && typeof latitude !== "number") {
     return res.status(400).json({ message: "Invalid latitude" });
   }
@@ -31,7 +23,6 @@ router.post("/sos", requireAppAuth, async (req, res) => {
     return res.status(400).json({ message: "Invalid message" });
   }
 
-  // Get Postgres user
   const userRes = await pool.query(
     "SELECT id, full_name FROM users WHERE firebase_uid = $1",
     [uid]
@@ -43,17 +34,56 @@ router.post("/sos", requireAppAuth, async (req, res) => {
   const userId = userRes.rows[0].id;
   const fullName = userRes.rows[0].full_name || "Unknown";
 
-  // Insert SOS event
-  const sosRes = await pool.query(
-    `INSERT INTO sos_events (user_id, latitude, longitude, address, message, status)
-     VALUES ($1, $2, $3, $4, $5, 'active')
-     RETURNING id, created_at`,
-    [userId, latitude ?? null, longitude ?? null, address ?? null, message ?? null]
-  );
+  let sosId = null;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const insertRes = await client.query(
+      `
+      INSERT INTO sos_events (
+        user_id,
+        latitude,
+        longitude,
+        address,
+        message,
+        status,
+        actor_type,
+        actor_admin_id
+      )
+      VALUES ($1, $2, $3, $4, $5, 'active', 'user', NULL)
+      RETURNING id
+      `,
+      [userId, latitude ?? null, longitude ?? null, address ?? null, message ?? null]
+    );
 
-  const sosId = sosRes.rows[0].id;
+    if (insertRes.rowCount === 0) {
+      throw new Error("Failed to create SOS event");
+    }
 
-  // ✅ Load accepted friends
+    sosId = Number(insertRes.rows[0].id);
+    await client.query(
+      `
+      UPDATE sos_events
+      SET sos_id = $1
+      WHERE id = $1
+      `,
+      [sosId]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
+    console.error("Create SOS event error:", err);
+    return res.status(500).json({ message: "Failed to create SOS event" });
+  } finally {
+    client.release();
+  }
+
+  publishSosDeltaBySosId(sosId).catch((err) => {
+    console.error("publish SOS delta error:", err);
+  });
+
   const friendsRes = await pool.query(
     `SELECT friend_user_id
      FROM friendships
@@ -68,11 +98,10 @@ router.post("/sos", requireAppAuth, async (req, res) => {
       sos_id: String(sosId),
       notified_users: 0,
       notified_devices: 0,
-      message: "SOS created, but you have no Beacon friends to notify.",
+      message: "SOS created, but you have no Beacon friends to notify."
     });
   }
 
-  // ✅ Load FCM tokens for friends
   const tokensRes = await pool.query(
     `SELECT DISTINCT fcm_token
      FROM devices
@@ -87,39 +116,34 @@ router.post("/sos", requireAppAuth, async (req, res) => {
       sos_id: String(sosId),
       notified_users: friendUserIds.length,
       notified_devices: 0,
-      message: "SOS created, but no device tokens found for your friends.",
+      message: "SOS created, but no device tokens found for your friends."
     });
   }
 
-  // ✅ Send push notifications
   const multicast = {
     tokens,
     notification: {
       title: "SOS Alert",
-      body: `${fullName} needs help. Tap to view details.`,
+      body: `${fullName} needs help. Tap to view details.`
     },
     data: {
       type: "SOS",
       sos_id: String(sosId),
-
-      // ✅ NEW: sender_name (this fixes your "Unknown" in Android)
       sender_name: String(fullName),
-
       sender_user_id: String(userId),
       latitude: latitude != null ? String(latitude) : "",
       longitude: longitude != null ? String(longitude) : "",
       address: address != null ? String(address) : "",
-      message: message != null ? String(message) : "",
+      message: message != null ? String(message) : ""
     },
     android: {
-      priority: "high",
-    },
+      priority: "high"
+    }
   };
 
   try {
     const resp = await admin.messaging().sendEachForMulticast(multicast);
 
-    // Optional: log failures (useful for debugging invalid tokens)
     const failed = [];
     resp.responses.forEach((r, i) => {
       if (!r.success) failed.push({ token: tokens[i], error: r.error?.message });
@@ -130,7 +154,7 @@ router.post("/sos", requireAppAuth, async (req, res) => {
       sos_id: String(sosId),
       notified_users: friendUserIds.length,
       notified_devices: resp.successCount,
-      failed_devices: resp.failureCount,
+      failed_devices: resp.failureCount
     });
   } catch (e) {
     console.error("FCM send error:", e);
@@ -138,7 +162,7 @@ router.post("/sos", requireAppAuth, async (req, res) => {
       sos_id: String(sosId),
       notified_users: friendUserIds.length,
       notified_devices: 0,
-      message: "SOS created, but push notification failed.",
+      message: "SOS created, but push notification failed."
     });
   }
 });
