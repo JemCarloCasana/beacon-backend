@@ -16,6 +16,7 @@ import incidentRoutes from "./src/routes/incidentRoutes.js";
 import broadcastRoutes from "./src/routes/broadcastRoutes.js";
 import adminBroadcastRoutes from "./src/routes/adminBroadcastRoutes.js";
 import adminSosRoutes from "./src/routes/adminSosRoutes.js";
+import adminReportsRoutes from "./src/routes/adminReportsRoutes.js";
 import { pool } from "./src/db.js";
 import { createRateLimiter } from "./src/middleware/rateLimit.js";
 import { getAuthMetricsSnapshot } from "./src/utils/authMetrics.js";
@@ -117,6 +118,7 @@ app.use(incidentRoutes);
 app.use(broadcastRoutes);
 app.use(adminBroadcastRoutes);
 app.use(adminSosRoutes);
+app.use(adminReportsRoutes);
 
 // 404 fallback (optional but useful)
 app.use((req, res) => {

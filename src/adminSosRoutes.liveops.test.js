@@ -62,6 +62,18 @@ test("GET /admin/sos/live returns 400 on invalid status query", async () => {
   assert.deepEqual(res.body, { message: "Invalid status filter" });
 });
 
+test("GET /admin/sos/live rejects legacy acknowledged status filter", async () => {
+  const stack = getRoute("/admin/sos/live", "get");
+  const handler = stack[stack.length - 1].handle;
+  const req = { query: { status: "acknowledged" } };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.body, { message: "Invalid status filter" });
+});
+
 test("GET /admin/sos/:sosId returns 400 on invalid sos id", async () => {
   const stack = getRoute("/admin/sos/:sosId", "get");
   const handler = stack[stack.length - 1].handle;

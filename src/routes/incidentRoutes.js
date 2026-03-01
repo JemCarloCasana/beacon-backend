@@ -5,6 +5,246 @@ import { requireAdminAuth } from "../middleware/adminAuth.js";
 
 const router = express.Router();
 const MAX_IMAGES_PER_INCIDENT = 5;
+const INCIDENT_STATUSES = ["pending", "dispatched", "in_progress", "resolved"];
+const INCIDENT_PRIORITIES = ["critical", "high", "medium", "low"];
+const INCIDENT_DEPARTMENTS = [
+  "Emergency Medical Unit",
+  "Fire Station Unit",
+  "Police Personnel",
+  "Traffic Enforcement Unit"
+];
+
+function parsePositiveInt(value) {
+  const num = Number(value);
+  if (!Number.isInteger(num) || num <= 0) {
+    return null;
+  }
+  return num;
+}
+
+function toIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date.toISOString();
+}
+
+function toImageRefArray(value) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function toIncidentImageUrl(incidentId, imageId, isAdminRoute = false) {
+  if (isAdminRoute) {
+    return `/admin/incidents/${incidentId}/images/${imageId}`;
+  }
+  return `/incidents/${incidentId}/images/${imageId}`;
+}
+
+function toIncidentDto(row, { isAdminRoute = false } = {}) {
+  const imageRefs = toImageRefArray(row.images)
+    .map((item) => ({
+      id: Number(item?.id),
+      sort_order: Number(item?.sort_order)
+    }))
+    .filter((item) => Number.isInteger(item.id) && item.id > 0)
+    .sort((a, b) => {
+      if (a.sort_order !== b.sort_order) {
+        return a.sort_order - b.sort_order;
+      }
+      return a.id - b.id;
+    });
+
+  const imageUrls = imageRefs.map((item) =>
+    toIncidentImageUrl(Number(row.id), item.id, isAdminRoute)
+  );
+
+  return {
+    id: Number(row.id),
+    title: `Incident #${row.id}`,
+    incident_type: row.incident_type ?? "",
+    assigned_department: row.assigned_department ?? null,
+    description: row.description ?? "",
+    priority: row.priority ?? "medium",
+    status: row.status,
+    location: {
+      latitude: row.latitude == null ? null : Number(row.latitude),
+      longitude: row.longitude == null ? null : Number(row.longitude),
+      address: row.address ?? null
+    },
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+    dispatchedAt: toIso(row.dispatched_at),
+    resolvedAt: toIso(row.resolved_at),
+    reportedByUserId: row.user_id == null ? null : Number(row.user_id),
+    resolutionNotes: row.resolution_notes ?? null,
+    image_url: imageUrls[0] ?? null,
+    images: imageUrls
+  };
+}
+
+function canTransitionStatus(currentStatus, nextStatus) {
+  if (!nextStatus || currentStatus === nextStatus) {
+    return true;
+  }
+
+  const allowedNext = {
+    pending: "dispatched",
+    dispatched: "in_progress",
+    in_progress: "resolved",
+    resolved: null
+  };
+
+  return allowedNext[currentStatus] === nextStatus;
+}
+
+async function listIncidents({ status, limit, offset }) {
+  const values = [];
+  const where = [];
+
+  if (status) {
+    values.push(status);
+    where.push(`ir.status = $${values.length}`);
+  }
+
+  values.push(limit);
+  const limitParam = `$${values.length}`;
+  values.push(offset);
+  const offsetParam = `$${values.length}`;
+  const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  const result = await pool.query(
+    `
+    SELECT
+      ir.id,
+      ir.user_id,
+      ir.incident_type,
+      ir.description,
+      ir.latitude,
+      ir.longitude,
+      ir.address,
+      ir.priority,
+      ir.status,
+      ir.created_at,
+      ir.updated_at,
+      ir.dispatched_at,
+      ir.resolved_at,
+      ir.assigned_department,
+      ir.resolution_notes,
+      COALESCE(img.images, '[]'::json) AS images
+    FROM incident_reports ir
+    LEFT JOIN LATERAL (
+      SELECT
+        json_agg(
+          json_build_object(
+            'id', iri.id,
+            'sort_order', iri.sort_order
+          )
+          ORDER BY iri.sort_order ASC, iri.id ASC
+        ) AS images
+      FROM incident_report_images iri
+      WHERE iri.incident_report_id = ir.id
+    ) img ON TRUE
+    ${whereClause}
+    ORDER BY ir.created_at DESC, ir.id DESC
+    LIMIT ${limitParam}
+    OFFSET ${offsetParam}
+    `,
+    values
+  );
+
+  return result.rows;
+}
+
+async function getIncidentById(incidentId) {
+  const result = await pool.query(
+    `
+    SELECT
+      ir.id,
+      ir.user_id,
+      ir.incident_type,
+      ir.description,
+      ir.latitude,
+      ir.longitude,
+      ir.address,
+      ir.priority,
+      ir.status,
+      ir.created_at,
+      ir.updated_at,
+      ir.dispatched_at,
+      ir.resolved_at,
+      ir.assigned_department,
+      ir.resolution_notes,
+      COALESCE(img.images, '[]'::json) AS images
+    FROM incident_reports ir
+    LEFT JOIN LATERAL (
+      SELECT
+        json_agg(
+          json_build_object(
+            'id', iri.id,
+            'sort_order', iri.sort_order
+          )
+          ORDER BY iri.sort_order ASC, iri.id ASC
+        ) AS images
+      FROM incident_report_images iri
+      WHERE iri.incident_report_id = ir.id
+    ) img ON TRUE
+    WHERE ir.id = $1
+    LIMIT 1
+    `,
+    [incidentId]
+  );
+
+  return result.rows[0] ?? null;
+}
+
+async function getIncidentImage({ incidentId, imageId, firebaseUid }) {
+  const values = [incidentId, imageId];
+  const userFilter =
+    typeof firebaseUid === "string" && firebaseUid.trim()
+      ? `AND EXISTS (
+          SELECT 1
+          FROM users u
+          WHERE u.id = ir.user_id
+            AND u.firebase_uid = $3
+        )`
+      : "";
+
+  if (userFilter) {
+    values.push(firebaseUid.trim());
+  }
+
+  const result = await pool.query(
+    `
+    SELECT iri.image_data, iri.content_type
+    FROM incident_report_images iri
+    JOIN incident_reports ir ON ir.id = iri.incident_report_id
+    WHERE ir.id = $1
+      AND iri.id = $2
+      ${userFilter}
+    LIMIT 1
+    `,
+    values
+  );
+
+  return result.rows[0] ?? null;
+}
 
 function detectImageContentType(buffer) {
   if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
@@ -100,43 +340,272 @@ function parseImageInput(value) {
 
 router.get("/admin/incidents", requireAdminAuth, async (req, res) => {
   try {
-    const status = typeof req.query?.status === "string" ? req.query.status.trim().toLowerCase() : "";
-    const values = [];
-    let whereClause = "";
-
-    if (status) {
-      values.push(status);
-      whereClause = `WHERE ir.status = $${values.length}`;
+    const status = typeof req.query?.status === "string" ? req.query.status.trim().toLowerCase() : null;
+    if (status && !INCIDENT_STATUSES.includes(status)) {
+      return res.status(400).json({ message: "Invalid status filter" });
     }
 
-    const result = await pool.query(
-      `
-      SELECT
-        ir.id,
-        ir.user_id,
-        ir.incident_type,
-        ir.description,
-        ir.latitude,
-        ir.longitude,
-        ir.address,
-        ir.status,
-        ir.created_at,
-        COALESCE(img.images_count, 0) AS images_count
-      FROM incident_reports ir
-      LEFT JOIN (
-        SELECT incident_report_id, COUNT(*)::int AS images_count
-        FROM incident_report_images
-        GROUP BY incident_report_id
-      ) img ON img.incident_report_id = ir.id
-      ${whereClause}
-      ORDER BY ir.created_at DESC, ir.id DESC
-      `,
-      values
-    );
+    const page = parsePositiveInt(req.query?.page) ?? 1;
+    const limit = Math.min(parsePositiveInt(req.query?.limit) ?? 20, 100);
+    const offset = (page - 1) * limit;
 
-    return res.json(result.rows);
+    const rows = await listIncidents({ status, limit, offset });
+    return res.json(rows.map((row) => toIncidentDto(row, { isAdminRoute: true })));
   } catch (err) {
     console.error("GET /admin/incidents error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.get("/admin/incidents/:id", requireAdminAuth, async (req, res) => {
+  try {
+    const incidentId = parsePositiveInt(req.params?.id);
+    if (!incidentId) {
+      return res.status(400).json({ message: "Invalid incident id" });
+    }
+
+    const row = await getIncidentById(incidentId);
+    if (!row) {
+      return res.status(404).json({ message: "Incident not found" });
+    }
+
+    return res.json(toIncidentDto(row, { isAdminRoute: true }));
+  } catch (err) {
+    console.error("GET /admin/incidents/:id error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.patch(
+  "/admin/incidents/:id",
+  requireAdminAuth,
+  async (req, res) => {
+    const client = await pool.connect();
+    try {
+      const incidentId = parsePositiveInt(req.params?.id);
+      if (!incidentId) {
+        return res.status(400).json({ message: "Invalid incident id" });
+      }
+
+      const nextStatus =
+        typeof req.body?.status === "string" ? req.body.status.trim().toLowerCase() : undefined;
+      const nextPriority =
+        typeof req.body?.priority === "string" ? req.body.priority.trim().toLowerCase() : undefined;
+      const nextIncidentTypeRaw = req.body?.incident_type;
+      const hasAssignedDepartmentKey =
+        Object.prototype.hasOwnProperty.call(req.body ?? {}, "assigned_department") ||
+        Object.prototype.hasOwnProperty.call(req.body ?? {}, "assignedDepartment");
+      const assignedDepartmentRaw = Object.prototype.hasOwnProperty.call(
+        req.body ?? {},
+        "assigned_department"
+      )
+        ? req.body?.assigned_department
+        : req.body?.assignedDepartment;
+      const resolutionNotesRaw = req.body?.resolutionNotes;
+
+      if (
+        Object.prototype.hasOwnProperty.call(req.body ?? {}, "assigned_admin_id") ||
+        Object.prototype.hasOwnProperty.call(req.body ?? {}, "assignedAdminId")
+      ) {
+        return res.status(400).json({
+          message: "assigned_admin_id is no longer supported; use assigned_department"
+        });
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "category")) {
+        return res.status(400).json({
+          message: "category is no longer supported; use incident_type"
+        });
+      }
+
+      if (nextStatus != null && !INCIDENT_STATUSES.includes(nextStatus)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+      if (nextPriority != null && !INCIDENT_PRIORITIES.includes(nextPriority)) {
+        return res.status(400).json({ message: "Invalid priority" });
+      }
+      let nextIncidentType = undefined;
+      if (nextIncidentTypeRaw !== undefined) {
+        if (typeof nextIncidentTypeRaw !== "string" || !nextIncidentTypeRaw.trim()) {
+          return res.status(400).json({ message: "Invalid incident_type" });
+        }
+        nextIncidentType = nextIncidentTypeRaw.trim();
+      }
+
+      let assignedDepartment = undefined;
+      if (hasAssignedDepartmentKey) {
+        if (assignedDepartmentRaw === null) {
+          assignedDepartment = null;
+        } else if (typeof assignedDepartmentRaw === "string") {
+          const normalizedDepartment = assignedDepartmentRaw.trim();
+          if (!INCIDENT_DEPARTMENTS.includes(normalizedDepartment)) {
+            return res.status(400).json({ message: "Invalid assigned_department" });
+          }
+          assignedDepartment = normalizedDepartment;
+        } else {
+          return res.status(400).json({ message: "Invalid assigned_department" });
+        }
+      }
+
+      let resolutionNotes = undefined;
+      if (resolutionNotesRaw !== undefined) {
+        if (resolutionNotesRaw === null) {
+          resolutionNotes = null;
+        } else if (typeof resolutionNotesRaw === "string") {
+          resolutionNotes = resolutionNotesRaw.trim() || null;
+        } else {
+          return res.status(400).json({ message: "Invalid resolutionNotes" });
+        }
+      }
+
+      if (
+        nextStatus === undefined &&
+        nextPriority === undefined &&
+        nextIncidentType === undefined &&
+        assignedDepartment === undefined &&
+        resolutionNotes === undefined
+      ) {
+        return res.status(400).json({ message: "No valid updates provided" });
+      }
+
+      await client.query("BEGIN");
+
+      const currentResult = await client.query(
+        `
+        SELECT
+          id,
+          status,
+          dispatched_at,
+          resolved_at
+        FROM incident_reports
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [incidentId]
+      );
+
+      if (currentResult.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "Incident not found" });
+      }
+
+      const current = currentResult.rows[0];
+      const effectiveStatus = nextStatus ?? current.status;
+      if (!canTransitionStatus(current.status, effectiveStatus)) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ message: "Invalid status transition" });
+      }
+
+      const values = [incidentId];
+      const setClauses = [];
+
+      if (nextIncidentType !== undefined) {
+        values.push(nextIncidentType);
+        setClauses.push(`incident_type = $${values.length}`);
+      }
+
+      if (nextStatus !== undefined) {
+        values.push(nextStatus);
+        setClauses.push(`status = $${values.length}`);
+      }
+
+      if (nextPriority !== undefined) {
+        values.push(nextPriority);
+        setClauses.push(`priority = $${values.length}`);
+      }
+
+      if (assignedDepartment !== undefined) {
+        values.push(assignedDepartment);
+        setClauses.push(`assigned_department = $${values.length}`);
+      }
+
+      if (resolutionNotes !== undefined) {
+        values.push(resolutionNotes);
+        setClauses.push(`resolution_notes = $${values.length}`);
+      }
+
+      if (effectiveStatus === "dispatched" && current.dispatched_at == null) {
+        setClauses.push("dispatched_at = NOW()");
+      }
+
+      if (effectiveStatus === "resolved" && current.resolved_at == null) {
+        setClauses.push("resolved_at = NOW()");
+      }
+
+      setClauses.push("updated_at = NOW()");
+
+      const updateResult = await client.query(
+        `
+        UPDATE incident_reports
+        SET ${setClauses.join(", ")}
+        WHERE id = $1
+        RETURNING id
+        `,
+        values
+      );
+
+      await client.query("COMMIT");
+      const updated = await getIncidentById(updateResult.rows[0].id);
+      return res.json(toIncidentDto(updated, { isAdminRoute: true }));
+    } catch (err) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackErr) {
+        console.error("PATCH /admin/incidents/:id rollback error:", rollbackErr);
+      }
+      console.error("PATCH /admin/incidents/:id error:", err);
+      return res.status(500).json({ message: "Server error" });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+router.get(
+  "/admin/incidents/:incidentId/images/:imageId",
+  requireAdminAuth,
+  async (req, res) => {
+    try {
+      const incidentId = parsePositiveInt(req.params?.incidentId);
+      const imageId = parsePositiveInt(req.params?.imageId);
+      if (!incidentId || !imageId) {
+        return res.status(400).json({ message: "Invalid incident/image id" });
+      }
+
+      const image = await getIncidentImage({ incidentId, imageId });
+      if (!image) {
+        return res.status(404).json({ message: "Image not found" });
+      }
+
+      res.set("Content-Type", image.content_type || "application/octet-stream");
+      return res.send(image.image_data);
+    } catch (err) {
+      console.error("GET /admin/incidents/:incidentId/images/:imageId error:", err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+router.get("/incidents/:incidentId/images/:imageId", requireAppAuth, async (req, res) => {
+  try {
+    const incidentId = parsePositiveInt(req.params?.incidentId);
+    const imageId = parsePositiveInt(req.params?.imageId);
+    if (!incidentId || !imageId) {
+      return res.status(400).json({ message: "Invalid incident/image id" });
+    }
+
+    const image = await getIncidentImage({
+      incidentId,
+      imageId,
+      firebaseUid: req.auth?.uid
+    });
+    if (!image) {
+      return res.status(404).json({ message: "Image not found" });
+    }
+
+    res.set("Content-Type", image.content_type || "application/octet-stream");
+    return res.send(image.image_data);
+  } catch (err) {
+    console.error("GET /incidents/:incidentId/images/:imageId error:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });

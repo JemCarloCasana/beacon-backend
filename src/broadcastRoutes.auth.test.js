@@ -119,10 +119,7 @@ test("POST /admin/broadcasts/:id/ack returns 200 for authenticated app user with
   await handler(req, res);
 
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body, {
-    ok: true,
-    acknowledged_at: null,
-  });
+  assert.deepEqual(res.body, { ok: true });
 });
 
 test("GET /admin/broadcasts/my/inbox returns 401 without bearer token", async () => {

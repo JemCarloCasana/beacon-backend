@@ -339,10 +339,7 @@ router.post("/admin/broadcasts/:id/ack", requireFirebaseAuth, async (req, res) =
       return res.status(404).json({ message: "Delivery not found" });
     }
 
-    return res.json({
-      ok: true,
-      acknowledged_at: null,
-    });
+    return res.json({ ok: true });
   } catch (err) {
     console.error("POST /admin/broadcasts/:id/ack error:", err);
     return res.status(500).json({ message: "Server error" });

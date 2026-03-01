@@ -1,7 +1,8 @@
-import { pool } from "../db.js";
+﻿import { pool } from "../db.js";
 
-const VALID_STATUSES = new Set(["active", "acknowledged", "resolved"]);
-const VALID_LIVE_FILTERS = new Set(["open", "active", "acknowledged", "resolved"]);
+const VALID_STATUSES = new Set(["active", "resolved", "acknowledged"]);
+const VALID_EVENT_TYPES = new Set(["report_created", "status_update", "admin_acknowledged", "note"]);
+const VALID_LIVE_FILTERS = new Set(["open", "active", "resolved"]);
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const REPLAY_WINDOW_MS = 5 * 60 * 1000;
@@ -51,7 +52,7 @@ function normalizeLimit(limit) {
 
 function statusWhereClause(status) {
   if (status === "open") {
-    return "t.latest_status IN ('active', 'acknowledged')";
+    return "t.latest_status = 'active'";
   }
   return "t.latest_status = $STATUS$";
 }
@@ -129,57 +130,46 @@ export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, 
 
   const result = await pool.query(
     `
-    WITH latest AS (
-      SELECT DISTINCT ON (se.sos_id)
-        se.sos_id,
-        se.user_id,
-        se.status AS latest_status,
-        se.message AS latest_message,
-        se.latitude AS latest_latitude,
-        se.longitude AS latest_longitude,
-        se.address AS latest_address,
-        se.created_at AS latest_event_at
-      FROM sos_events se
-      WHERE se.sos_id IS NOT NULL
-      ORDER BY se.sos_id, se.created_at DESC, se.id DESC
-    ),
-    thread AS (
+    WITH thread AS (
       SELECT
-        l.sos_id,
-        l.user_id,
+        st.id AS thread_id,
+        st.root_event_id AS sos_id,
+        st.user_id,
         u.full_name,
         u.phone_number,
         u.role,
-        l.latest_status,
-        l.latest_message,
-        l.latest_latitude,
-        l.latest_longitude,
-        l.latest_address,
+        st.latest_status,
+        st.emergency_category,
+        st.acknowledged_at,
+        st.acknowledged_by_admin_id,
+        st.resolved_at,
         root.created_at AS opened_at,
-        l.latest_event_at,
-        ack.acknowledged_at,
-        rs.resolved_at
-      FROM latest l
-      JOIN users u ON u.id = l.user_id
-      LEFT JOIN sos_events root ON root.id = l.sos_id
+        le.message AS latest_message,
+        le.latitude AS latest_latitude,
+        le.longitude AS latest_longitude,
+        le.address AS latest_address,
+        COALESCE(le.created_at, root.created_at) AS latest_event_at
+      FROM sos_threads st
+      JOIN users u ON u.id = st.user_id
+      LEFT JOIN sos_events root ON root.id = st.root_event_id
       LEFT JOIN LATERAL (
-        SELECT se_ack.created_at AS acknowledged_at
-        FROM sos_events se_ack
-        WHERE se_ack.sos_id = l.sos_id
-          AND se_ack.status = 'acknowledged'
-        ORDER BY se_ack.created_at DESC, se_ack.id DESC
+        SELECT
+          se.message,
+          se.latitude,
+          se.longitude,
+          se.address,
+          se.created_at
+        FROM sos_events se
+        WHERE se.thread_id = st.id
+        ORDER BY se.created_at DESC, se.id DESC
         LIMIT 1
-      ) ack ON true
-      LEFT JOIN LATERAL (
-        SELECT se_res.created_at AS resolved_at
-        FROM sos_events se_res
-        WHERE se_res.sos_id = l.sos_id
-          AND se_res.status = 'resolved'
-        ORDER BY se_res.created_at DESC, se_res.id DESC
-        LIMIT 1
-      ) rs ON true
+      ) le ON true
     )
-    SELECT *
+    SELECT
+      t.*,
+      t.acknowledged_at AS admin_acknowledged_at,
+      t.acknowledged_by_admin_id AS admin_acknowledged_by_admin_id,
+      (t.latest_status = 'active' AND t.acknowledged_at IS NULL) AS requires_attention
     FROM thread t
     WHERE ${whereParts.join(" AND ")}
     ORDER BY t.latest_event_at DESC, t.sos_id DESC
@@ -214,52 +204,44 @@ export async function getLatestThreadState(sosId) {
 export async function getThreadStateAnyStatus(sosId) {
   const result = await pool.query(
     `
-    WITH latest AS (
-      SELECT DISTINCT ON (se.sos_id)
-        se.sos_id,
-        se.user_id,
-        se.status AS latest_status,
-        se.message AS latest_message,
-        se.latitude AS latest_latitude,
-        se.longitude AS latest_longitude,
-        se.address AS latest_address,
-        se.created_at AS latest_event_at
-      FROM sos_events se
-      WHERE se.sos_id = $1
-      ORDER BY se.sos_id, se.created_at DESC, se.id DESC
-    )
     SELECT
-      l.sos_id,
-      l.user_id,
+      st.id AS thread_id,
+      st.root_event_id AS sos_id,
+      st.user_id,
       u.full_name,
       u.phone_number,
       u.role,
-      l.latest_status,
-      l.latest_message,
-      l.latest_latitude,
-      l.latest_longitude,
-      l.latest_address,
+      st.latest_status,
+      st.emergency_category,
+      st.acknowledged_at,
+      st.acknowledged_by_admin_id,
+      st.resolved_at,
       root.created_at AS opened_at,
-      l.latest_event_at,
-      ack.acknowledged_at,
-      rs.resolved_at
-    FROM latest l
-    JOIN users u ON u.id = l.user_id
-    LEFT JOIN sos_events root ON root.id = l.sos_id
+      le.message AS latest_message,
+      le.latitude AS latest_latitude,
+      le.longitude AS latest_longitude,
+      le.address AS latest_address,
+      COALESCE(le.created_at, root.created_at) AS latest_event_at,
+      st.acknowledged_at AS admin_acknowledged_at,
+      st.acknowledged_by_admin_id AS admin_acknowledged_by_admin_id,
+      (st.latest_status = 'active' AND st.acknowledged_at IS NULL) AS requires_attention
+    FROM sos_threads st
+    JOIN users u ON u.id = st.user_id
+    LEFT JOIN sos_events root ON root.id = st.root_event_id
     LEFT JOIN LATERAL (
-      SELECT se_ack.created_at AS acknowledged_at
-      FROM sos_events se_ack
-      WHERE se_ack.sos_id = l.sos_id AND se_ack.status = 'acknowledged'
-      ORDER BY se_ack.created_at DESC, se_ack.id DESC
+      SELECT
+        se.message,
+        se.latitude,
+        se.longitude,
+        se.address,
+        se.created_at
+      FROM sos_events se
+      WHERE se.thread_id = st.id
+      ORDER BY se.created_at DESC, se.id DESC
       LIMIT 1
-    ) ack ON true
-    LEFT JOIN LATERAL (
-      SELECT se_res.created_at AS resolved_at
-      FROM sos_events se_res
-      WHERE se_res.sos_id = l.sos_id AND se_res.status = 'resolved'
-      ORDER BY se_res.created_at DESC, se_res.id DESC
-      LIMIT 1
-    ) rs ON true
+    ) le ON true
+    WHERE st.root_event_id = $1
+    LIMIT 1
     `,
     [sosId]
   );
@@ -271,6 +253,7 @@ export async function listThreadEvents(sosId) {
     `
     SELECT
       id,
+      thread_id,
       sos_id,
       user_id,
       status,
@@ -280,7 +263,9 @@ export async function listThreadEvents(sosId) {
       message,
       created_at,
       actor_type,
-      actor_admin_id
+      actor_admin_id,
+      event_type,
+      emergency_category
     FROM sos_events
     WHERE sos_id = $1
     ORDER BY created_at ASC, id ASC
@@ -291,36 +276,29 @@ export async function listThreadEvents(sosId) {
 }
 
 export async function listLiveMapRows() {
-  const columnCheck = await pool.query(
-    `
-    SELECT EXISTS (
-      SELECT 1
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = 'sos_events'
-        AND column_name = 'sos_id'
-    ) AS has_sos_id
-    `
-  );
-  const hasSosId = Boolean(columnCheck.rows[0]?.has_sos_id);
-  const sosIdSelect = hasSosId ? "se.sos_id" : "se.id";
-
   const result = await pool.query(
     `
-    SELECT DISTINCT ON (se.user_id)
-      ${sosIdSelect} AS sos_id,
-      se.user_id,
-      se.latitude,
-      se.longitude,
-      se.address,
-      se.message,
-      se.status,
-      se.created_at
-    FROM sos_events se
-    WHERE se.status = 'active'
-      AND se.latitude IS NOT NULL
-      AND se.longitude IS NOT NULL
-    ORDER BY se.user_id, se.created_at DESC, se.id DESC
+    SELECT DISTINCT ON (st.user_id)
+      st.root_event_id AS sos_id,
+      st.user_id,
+      le.latitude,
+      le.longitude,
+      le.address,
+      le.message,
+      st.latest_status AS status,
+      le.created_at
+    FROM sos_threads st
+    JOIN LATERAL (
+      SELECT se.latitude, se.longitude, se.address, se.message, se.created_at
+      FROM sos_events se
+      WHERE se.thread_id = st.id
+        AND se.latitude IS NOT NULL
+        AND se.longitude IS NOT NULL
+      ORDER BY se.created_at DESC, se.id DESC
+      LIMIT 1
+    ) le ON true
+    WHERE st.latest_status = 'active'
+    ORDER BY st.user_id, le.created_at DESC
     `
   );
   return result.rows;
@@ -330,32 +308,49 @@ export async function getLatestThreadEventForUpdate(client, sosId) {
   const result = await client.query(
     `
     SELECT
-      id,
-      sos_id,
-      user_id,
-      status,
-      latitude,
-      longitude,
-      address
-    FROM sos_events
-    WHERE sos_id = $1
-    ORDER BY created_at DESC, id DESC
+      st.id AS thread_id,
+      st.root_event_id AS sos_id,
+      st.user_id,
+      st.latest_status AS status,
+      st.acknowledged_at,
+      st.acknowledged_by_admin_id,
+      st.resolved_at,
+      st.emergency_category,
+      le.latitude,
+      le.longitude,
+      le.address
+    FROM sos_threads st
+    LEFT JOIN LATERAL (
+      SELECT se.latitude, se.longitude, se.address
+      FROM sos_events se
+      WHERE se.thread_id = st.id
+      ORDER BY se.created_at DESC, se.id DESC
+      LIMIT 1
+    ) le ON true
+    WHERE st.root_event_id = $1
     LIMIT 1
-    FOR UPDATE
+    FOR UPDATE OF st
     `,
     [sosId]
   );
   return result.rowCount > 0 ? result.rows[0] : null;
 }
 
-export async function appendAdminStatusEvent(client, { sosId, adminId, userId, status, note, latitude, longitude, address }) {
+export async function appendAdminStatusEvent(
+  client,
+  { threadId, sosId, adminId, userId, status, note, latitude, longitude, address, eventType = "status_update", emergencyCategory = null }
+) {
   if (!VALID_STATUSES.has(status)) {
     throw new Error(`Unsupported status: ${status}`);
+  }
+  if (!VALID_EVENT_TYPES.has(eventType)) {
+    throw new Error(`Unsupported event type: ${eventType}`);
   }
 
   const result = await client.query(
     `
     INSERT INTO sos_events (
+      thread_id,
       sos_id,
       user_id,
       latitude,
@@ -364,12 +359,26 @@ export async function appendAdminStatusEvent(client, { sosId, adminId, userId, s
       message,
       status,
       actor_type,
-      actor_admin_id
+      actor_admin_id,
+      event_type,
+      emergency_category
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, 'admin', $8)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'admin', $9, $10, $11)
     RETURNING id, sos_id, user_id, status, created_at
     `,
-    [sosId, userId, latitude ?? null, longitude ?? null, address ?? null, note ?? null, status, adminId]
+    [
+      threadId,
+      sosId,
+      userId,
+      latitude ?? null,
+      longitude ?? null,
+      address ?? null,
+      note ?? null,
+      status,
+      adminId,
+      eventType,
+      emergencyCategory
+    ]
   );
   return result.rows[0];
 }
@@ -467,3 +476,4 @@ export async function publishSosDeltaBySosId(sosId) {
     }
   }
 }
+

@@ -50,6 +50,11 @@ function buildActionResponse(thread) {
     sos_id: thread.sos_id,
     latest_status: thread.latest_status,
     acknowledged_at: thread.acknowledged_at,
+    admin_acknowledged_at: thread.acknowledged_at,
+    acknowledged_by_admin_id: thread.acknowledged_by_admin_id,
+    admin_acknowledged_by_admin_id: thread.acknowledged_by_admin_id,
+    emergency_category: thread.emergency_category,
+    requires_attention: Boolean(thread.requires_attention),
     latest_event_at: thread.latest_event_at
   };
 }
@@ -158,28 +163,48 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, async (req, res) 
       return res.status(409).json({ message: "SOS thread is already resolved" });
     }
 
-    if (latest.status === "acknowledged") {
+    if (latest.acknowledged_at) {
       await client.query("ROLLBACK");
       const current = await getThreadStateAnyStatus(sosId);
       return res.json(buildActionResponse(current));
     }
 
+    await client.query(
+      `
+      UPDATE sos_threads
+      SET
+        acknowledged_at = NOW(),
+        acknowledged_by_admin_id = $2,
+        updated_at = NOW()
+      WHERE id = $1
+      `,
+      [latest.thread_id, Number(req.admin.adminId)]
+    );
+
     await appendAdminStatusEvent(client, {
+      threadId: Number(latest.thread_id),
       sosId,
       adminId: Number(req.admin.adminId),
       userId: Number(latest.user_id),
-      status: "acknowledged",
+      status: "active",
       note: typeof note === "string" ? note : null,
       latitude: latest.latitude,
       longitude: latest.longitude,
-      address: latest.address
+      address: latest.address,
+      eventType: "admin_acknowledged",
+      emergencyCategory: latest.emergency_category
     });
 
     await client.query("COMMIT");
     recordAckMetric();
 
     const current = await getThreadStateAnyStatus(sosId);
-    await publishSosDeltaBySosId(sosId);
+    if (!current) {
+      return res.status(500).json({ message: "SOS thread state unavailable after acknowledge" });
+    }
+    publishSosDeltaBySosId(sosId).catch((publishErr) => {
+      console.error("publish SOS delta error (acknowledge):", publishErr);
+    });
     return res.json(buildActionResponse(current));
   } catch (err) {
     try {
@@ -220,12 +245,25 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
       return res.json(buildActionResponse(current));
     }
 
-    if (latest.status !== "active" && latest.status !== "acknowledged") {
+    if (latest.status !== "active") {
       await client.query("ROLLBACK");
       return res.status(409).json({ message: `Cannot resolve SOS in status '${latest.status}'` });
     }
 
+    await client.query(
+      `
+      UPDATE sos_threads
+      SET
+        latest_status = 'resolved',
+        resolved_at = COALESCE(resolved_at, NOW()),
+        updated_at = NOW()
+      WHERE id = $1
+      `,
+      [latest.thread_id]
+    );
+
     await appendAdminStatusEvent(client, {
+      threadId: Number(latest.thread_id),
       sosId,
       adminId: Number(req.admin.adminId),
       userId: Number(latest.user_id),
@@ -233,14 +271,21 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
       note: typeof note === "string" ? note : null,
       latitude: latest.latitude,
       longitude: latest.longitude,
-      address: latest.address
+      address: latest.address,
+      eventType: "status_update",
+      emergencyCategory: latest.emergency_category
     });
 
     await client.query("COMMIT");
     recordResolveMetric();
 
     const current = await getThreadStateAnyStatus(sosId);
-    await publishSosDeltaBySosId(sosId);
+    if (!current) {
+      return res.status(500).json({ message: "SOS thread state unavailable after resolve" });
+    }
+    publishSosDeltaBySosId(sosId).catch((publishErr) => {
+      console.error("publish SOS delta error (resolve):", publishErr);
+    });
     return res.json(buildActionResponse(current));
   } catch (err) {
     try {

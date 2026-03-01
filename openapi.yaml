@@ -1,8 +1,52 @@
-openapi: 3.0.3
+﻿openapi: 3.0.3
 info:
   title: Beacon Backend API
-  version: 1.0.0
+  version: 1.1.0
+
 paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: Service healthy
+
+  /health/db:
+    get:
+      summary: Database health check
+      responses:
+        "200":
+          description: DB reachable
+        "503":
+          $ref: "#/components/responses/Error"
+
+  /me/bootstrap:
+    post:
+      summary: Create/update current user profile from auth context
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [full_name]
+              properties:
+                full_name:
+                  type: string
+                phone_number:
+                  type: string
+      responses:
+        "200":
+          description: Profile upserted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDto"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
   /me:
     get:
       summary: Get current authenticated user
@@ -14,23 +58,7 @@ paths:
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: "#/components/schemas/UserDto"
-                  - type: object
-                    properties:
-                      beacon_code:
-                        type: string
-                        nullable: true
-                      created_at:
-                        type: string
-                        format: date-time
-                        nullable: true
-                      updated_at:
-                        type: string
-                        format: date-time
-                        nullable: true
-        "401":
-          $ref: "#/components/responses/Unauthorized"
+                $ref: "#/components/schemas/UserDto"
         "404":
           $ref: "#/components/responses/NotFound"
     patch:
@@ -52,10 +80,7 @@ paths:
                 $ref: "#/components/schemas/UserDto"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
+
   /users:
     get:
       summary: Get current authenticated user (compatibility alias)
@@ -67,37 +92,240 @@ paths:
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: "#/components/schemas/UserDto"
-                  - type: object
-                    properties:
-                      beacon_code:
-                        type: string
-                        nullable: true
-                      created_at:
-                        type: string
-                        format: date-time
-                        nullable: true
-                      updated_at:
-                        type: string
-                        format: date-time
-                        nullable: true
-        "401":
-          $ref: "#/components/responses/Unauthorized"
+                $ref: "#/components/schemas/UserDto"
+
+  /users/{id}/public:
+    get:
+      summary: Public user profile
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Public profile
         "404":
           $ref: "#/components/responses/NotFound"
-  /admin/users/{id}:
+
+  /devices/register:
+    post:
+      summary: Register/refresh device token
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                platform:
+                  type: string
+      responses:
+        "200":
+          description: Registered
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /contacts:
+    get:
+      summary: List emergency contacts for current user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Contact list
+    post:
+      summary: Create emergency contact
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Contact created
+
+  /contacts/{id}:
     patch:
-      summary: Admin updates a user profile by user id
+      summary: Update emergency contact
       security:
         - bearerAuth: []
       parameters:
-        - name: id
-          in: path
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Contact updated
+    delete:
+      summary: Delete emergency contact
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Contact deleted
+
+  /contacts/{id}/primary:
+    patch:
+      summary: Set/unset contact primary flag
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Contact updated
+
+  /friends/request:
+    post:
+      summary: Send friend request via beacon code
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Request created
+
+  /friends/requests/incoming:
+    get:
+      summary: List incoming friend requests
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Incoming requests
+
+  /friends/requests/{id}/accept:
+    post:
+      summary: Accept friend request
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Accepted
+
+  /friends/requests/{id}/reject:
+    post:
+      summary: Reject friend request
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Rejected
+
+  /friends:
+    get:
+      summary: List current user friends
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Friends
+
+  /friends/{id}:
+    delete:
+      summary: Remove friend
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Removed
+
+  /friends/search:
+    get:
+      summary: Search current user's friends
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
           required: true
           schema:
-            type: integer
-            minimum: 1
+            type: string
+      responses:
+        "200":
+          description: Search results
+
+  /sos:
+    post:
+      summary: Create SOS thread and notify friends
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSosRequest"
+      responses:
+        "200":
+          description: SOS created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /admin/auth/signup:
+    post:
+      summary: Admin/personnel signup
+      responses:
+        "201":
+          description: Created
+
+  /admin/auth/login:
+    post:
+      summary: Admin/personnel login
+      responses:
+        "200":
+          description: Authenticated
+
+  /admin/me:
+    get:
+      summary: Get current admin profile + permissions
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Admin profile
+
+  /admin/admins:
+    get:
+      summary: List admin/personnel accounts
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Admin list
+
+  /admin/admins/{id}:
+    patch:
+      summary: Update admin account
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Updated admin
+    delete:
+      summary: Delete admin account
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Deleted
+
+  /admin/users/{id}:
+    patch:
+      summary: Admin updates user profile by id
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
       requestBody:
         required: true
         content:
@@ -111,16 +339,418 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserDto"
+
+  /admin/admin-requests:
+    get:
+      summary: List admin access requests
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Request list
+    post:
+      summary: Create admin access request
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Request created
+
+  /admin/admin-requests/{id}/accept:
+    patch:
+      summary: Accept admin access request
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Request approved
+
+  /admin/admin-requests/{id}/reject:
+    patch:
+      summary: Reject admin access request
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Request rejected
+
+  /admin/notifications:
+    get:
+      summary: List notifications for current admin
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Notification list
+
+  /admin/notifications/{id}/read:
+    patch:
+      summary: Mark notification as read
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Marked read
+
+  /incidents:
+    post:
+      summary: Create incident report
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIncidentRequest"
+      responses:
+        "201":
+          description: Incident created
+
+  /admin/incidents:
+    get:
+      summary: List incidents (admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, dispatched, in_progress, resolved]
+      responses:
+        "200":
+          description: Incident list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IncidentDto"
+
+  /admin/incidents/{id}:
+    get:
+      summary: Get incident by id (admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Incident
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentDto"
+    patch:
+      summary: Update incident (admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminPatchIncidentRequest"
+      responses:
+        "200":
+          description: Updated incident
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentDto"
+
+  /admin/incidents/{incidentId}/images/{imageId}:
+    get:
+      summary: Get incident image bytes (admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: incidentId
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: imageId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Raw image bytes
+        "400":
+          description: Invalid incident/image id
         "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+          description: Missing or invalid admin bearer token
         "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "422":
-          $ref: "#/components/responses/ValidationError"
+          description: Image not found
+
+  /admin/broadcasts:
+    post:
+      summary: Create broadcast
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Broadcast created
+    get:
+      summary: List broadcasts
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Broadcast list
+
+  /admin/broadcasts/{id}/send:
+    post:
+      summary: Send broadcast
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Sent
+
+  /admin/broadcasts/{id}/publish:
+    post:
+      summary: Publish broadcast (compat route)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Published
+
+  /admin/broadcasts/my/inbox:
+    get:
+      summary: List current app user's broadcast inbox
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Inbox
+
+  /admin/broadcasts/{id}/ack:
+    post:
+      summary: Acknowledge broadcast delivery (presence check)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Acknowledged
+
+  /admin/sos/live-map:
+    get:
+      summary: Live active SOS map rows
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active SOS map feed
+
+  /admin/sos/live:
+    get:
+      summary: Live SOS thread list
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, active, resolved]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SOS threads
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SosThread"
+
+  /admin/sos/live/stream:
+    get:
+      summary: Live SOS SSE stream
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: SSE stream
+
+  /admin/sos/{sosId}:
+    get:
+      summary: SOS thread detail + timeline
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sosId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: SOS detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  thread:
+                    $ref: "#/components/schemas/SosThread"
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SosEvent"
+
+  /admin/sos/{sosId}/acknowledge:
+    post:
+      summary: Admin acknowledge SOS (thread-level acknowledgement)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sosId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Acknowledged
+
+  /admin/sos/{sosId}/resolve:
+    post:
+      summary: Resolve SOS thread
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sosId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Resolved
+
+  /admin/reports/overview:
+    get:
+      summary: Get admin analytics overview for a range
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: range
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+        - name: timezone
+          in: query
+          required: false
+          schema:
+            type: string
+            default: Asia/Manila
+      responses:
+        "200":
+          description: Reports overview payload
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Missing or invalid admin bearer token
+        "500":
+          $ref: "#/components/responses/Error"
+
+  /admin/reports/generate:
+    post:
+      summary: Generate and persist admin report run
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [report_key]
+              properties:
+                report_key:
+                  type: string
+                  enum:
+                    - daily_incident_summary
+                    - weekly_response_analysis
+                    - monthly_safety_report
+                timezone:
+                  type: string
+                  default: Asia/Manila
+      responses:
+        "200":
+          description: Reports overview payload after generation
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Missing or invalid admin bearer token
+        "500":
+          $ref: "#/components/responses/Error"
+
+  /admin/reports/export.csv:
+    get:
+      summary: Export admin analytics as CSV
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: range
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+        - name: timezone
+          in: query
+          required: false
+          schema:
+            type: string
+            default: Asia/Manila
+      responses:
+        "200":
+          description: CSV download
+          content:
+            text/csv:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Missing or invalid admin bearer token
+        "500":
+          $ref: "#/components/responses/Error"
 
 components:
   securitySchemes:
@@ -128,15 +758,141 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+
   schemas:
+    IncidentDepartment:
+      type: string
+      enum:
+        - Emergency Medical Unit
+        - Fire Station Unit
+        - Police Personnel
+        - Traffic Enforcement Unit
+
+    CreateIncidentRequest:
+      type: object
+      required: [incident_type, description]
+      properties:
+        incident_type:
+          type: string
+        description:
+          type: string
+        latitude:
+          type: number
+          nullable: true
+        longitude:
+          type: number
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        images:
+          type: array
+          items:
+            type: string
+
+    IncidentLocation:
+      type: object
+      properties:
+        latitude:
+          type: number
+          nullable: true
+        longitude:
+          type: number
+          nullable: true
+        address:
+          type: string
+          nullable: true
+
+    IncidentDto:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        incident_type:
+          type: string
+        assigned_department:
+          allOf:
+            - $ref: "#/components/schemas/IncidentDepartment"
+          nullable: true
+        description:
+          type: string
+        priority:
+          type: string
+          enum: [critical, high, medium, low]
+        status:
+          type: string
+          enum: [pending, dispatched, in_progress, resolved]
+        location:
+          $ref: "#/components/schemas/IncidentLocation"
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        dispatchedAt:
+          type: string
+          format: date-time
+          nullable: true
+        resolvedAt:
+          type: string
+          format: date-time
+          nullable: true
+        reportedByUserId:
+          type: integer
+          nullable: true
+        resolutionNotes:
+          type: string
+          nullable: true
+        image_url:
+          type: string
+          nullable: true
+          description: Admin incident image URL (`/admin/incidents/{incidentId}/images/{imageId}`) when returned by admin incident endpoints.
+        images:
+          type: array
+          items:
+            type: string
+          description: Ordered admin incident image URLs for admin incident endpoints.
+
+    AdminPatchIncidentRequest:
+      type: object
+      properties:
+        incident_type:
+          type: string
+        assigned_department:
+          allOf:
+            - $ref: "#/components/schemas/IncidentDepartment"
+          nullable: true
+        assignedDepartment:
+          allOf:
+            - $ref: "#/components/schemas/IncidentDepartment"
+          nullable: true
+        status:
+          type: string
+          enum: [pending, dispatched, in_progress, resolved]
+        priority:
+          type: string
+          enum: [critical, high, medium, low]
+        resolutionNotes:
+          type: string
+          nullable: true
+
     UserDto:
       type: object
-      required:
-        - id
-        - firebase_uid
-        - email
-        - full_name
-        - role
+      required: [id, firebase_uid, email, full_name, role]
       properties:
         id:
           type: integer
@@ -157,6 +913,7 @@ components:
           type: string
           format: uri
           nullable: true
+
     PatchMeRequest:
       type: object
       properties:
@@ -174,6 +931,7 @@ components:
           type: string
           format: uri
           nullable: true
+
     AdminPatchUserRequest:
       type: object
       additionalProperties: false
@@ -186,6 +944,132 @@ components:
           type: string
           format: email
       minProperties: 1
+
+    CreateSosRequest:
+      type: object
+      required: [category]
+      properties:
+        latitude:
+          type: number
+          nullable: true
+        longitude:
+          type: number
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        message:
+          type: string
+          nullable: true
+        category:
+          type: string
+          enum: [medical, fire, violence, unknown]
+
+    SosThread:
+      type: object
+      properties:
+        thread_id:
+          type: integer
+        sos_id:
+          type: integer
+        user_id:
+          type: integer
+        full_name:
+          type: string
+          nullable: true
+        phone_number:
+          type: string
+          nullable: true
+        role:
+          type: string
+          nullable: true
+        latest_status:
+          type: string
+          enum: [active, resolved]
+        emergency_category:
+          type: string
+          enum: [medical, fire, violence, unknown]
+        latest_message:
+          type: string
+          nullable: true
+        latest_latitude:
+          type: number
+          nullable: true
+        latest_longitude:
+          type: number
+          nullable: true
+        latest_address:
+          type: string
+          nullable: true
+        opened_at:
+          type: string
+          format: date-time
+          nullable: true
+        latest_event_at:
+          type: string
+          format: date-time
+          nullable: true
+        acknowledged_at:
+          type: string
+          format: date-time
+          nullable: true
+        acknowledged_by_admin_id:
+          type: integer
+          nullable: true
+        admin_acknowledged_at:
+          type: string
+          format: date-time
+          nullable: true
+        admin_acknowledged_by_admin_id:
+          type: integer
+          nullable: true
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    SosEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+        thread_id:
+          type: integer
+          nullable: true
+        sos_id:
+          type: integer
+        user_id:
+          type: integer
+        status:
+          type: string
+        latitude:
+          type: number
+          nullable: true
+        longitude:
+          type: number
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        message:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        actor_type:
+          type: string
+        actor_admin_id:
+          type: integer
+          nullable: true
+        event_type:
+          type: string
+          enum: [report_created, status_update, admin_acknowledged, note]
+        emergency_category:
+          type: string
+          enum: [medical, fire, violence, unknown]
+          nullable: true
+
     ValidationErrorResponse:
       type: object
       properties:
@@ -197,11 +1081,13 @@ components:
             type: array
             items:
               type: string
+
     ErrorResponse:
       type: object
       properties:
         message:
           type: string
+
   responses:
     BadRequest:
       description: Invalid request
@@ -222,7 +1108,7 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     NotFound:
-      description: User not found
+      description: Resource not found
       content:
         application/json:
           schema:
@@ -239,3 +1125,9 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ValidationErrorResponse"
+    Error:
+      description: Server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
