@@ -11,7 +11,7 @@ const router = express.Router();
 router.get("/admin/me", requireAuth, async (req, res) => {
   try {
     const adminId = req.admin.adminId;
-    if (!adminId) return res.status(401).json({ message: "Unauthorized" });
+    if (!adminId) return res.status(401).json({ message: "UNAUTHORIZED" });
 
     const adminResult = await pool.query(
       `
@@ -24,7 +24,7 @@ router.get("/admin/me", requireAuth, async (req, res) => {
     );
 
     if (adminResult.rowCount === 0) {
-      return res.status(401).json({ message: "Admin not found" });
+      return res.status(401).json({ message: "UNAUTHORIZED" });
     }
 
     const admin = adminResult.rows[0];

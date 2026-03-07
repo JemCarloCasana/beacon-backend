@@ -30,8 +30,13 @@ export async function requireAuth(req, res, next) {
     if (!token) return res.status(401).json({ message: "Missing Bearer token" });
 
     const decoded = jwt.verify(token, JWT_SECRET);
+    const parsedAdminId = Number(decoded.adminId ?? decoded.sub);
+    if (!Number.isInteger(parsedAdminId) || parsedAdminId <= 0) {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+
     req.admin = {
-      adminId: decoded.adminId,
+      adminId: parsedAdminId,
       role: decoded.role,
       roleId: decoded.roleId
     };

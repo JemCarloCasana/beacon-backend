@@ -12,7 +12,7 @@
     "dev": "node --watch server.js",
     "start": "node server.js",
     "start:prod": "NODE_ENV=production node server.js",
-    "test": "node src/meRoutes.patch.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js && node src/broadcastRoutes.auth.test.js && node src/requireAuth.middleware.test.js && node src/adminSosRoutes.liveops.test.js && node src/incidentRoutes.admin.test.js && node src/sosRoutes.test.js && node src/adminReportsRoutes.test.js"
+    "test": "node src/adminAuthRoutes.contract.test.js && node src/meRoutes.patch.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js && node src/broadcastRoutes.auth.test.js && node src/requireAuth.middleware.test.js && node src/adminSosRoutes.liveops.test.js && node src/incidentRoutes.admin.test.js && node src/sosRoutes.test.js && node src/adminReportsRoutes.test.js"
   },
   "keywords": [
     "beacon",

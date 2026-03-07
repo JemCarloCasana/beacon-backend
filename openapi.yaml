@@ -270,16 +270,52 @@ paths:
   /admin/auth/signup:
     post:
       summary: Admin/personnel signup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAuthSignupRequest"
       responses:
         "201":
           description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthResponse"
+        "422":
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthValidationErrorResponse"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
   /admin/auth/login:
     post:
       summary: Admin/personnel login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminAuthLoginRequest"
       responses:
         "200":
           description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthResponse"
+        "422":
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthValidationErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /admin/me:
     get:
@@ -289,6 +325,12 @@ paths:
       responses:
         "200":
           description: Admin profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /admin/admins:
     get:
@@ -1069,6 +1111,86 @@ components:
           type: string
           enum: [medical, fire, violence, unknown]
           nullable: true
+
+    AdminAuthLoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+
+    AdminAuthSignupRequest:
+      type: object
+      required: [full_name, email, password, role]
+      properties:
+        full_name:
+          type: string
+        email:
+          type: string
+        password:
+          type: string
+        role:
+          type: string
+          enum: [personnel]
+
+    AdminIdentity:
+      type: object
+      required: [id, full_name, email, role]
+      properties:
+        id:
+          type: integer
+        full_name:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        role_id:
+          type: integer
+        permissions:
+          type: array
+          items:
+            type: string
+
+    AdminAuthResponse:
+      type: object
+      required: [token, admin]
+      properties:
+        token:
+          type: string
+        admin:
+          $ref: "#/components/schemas/AdminIdentity"
+
+    AdminMeResponse:
+      type: object
+      required: [id, full_name, email, role, permissions]
+      properties:
+        id:
+          type: integer
+        full_name:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        role_id:
+          type: integer
+        permissions:
+          type: array
+          items:
+            type: string
+
+    AdminAuthValidationErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        errors:
+          type: object
+          additionalProperties:
+            type: string
 
     ValidationErrorResponse:
       type: object
