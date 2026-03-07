@@ -94,6 +94,16 @@ test("GET /admin/incidents returns mapped DTO rows with filter + pagination", as
   assert.equal(res.body[0].id, 9);
   assert.equal(res.body[0].incident_type, "legacy_type");
   assert.equal(res.body[0].assigned_department, "Police Personnel");
+  assert.equal(res.body[0].created_at, "2026-03-01T00:00:00.000Z");
+  assert.equal(res.body[0].updated_at, "2026-03-01T00:05:00.000Z");
+  assert.equal(res.body[0].dispatched_at, "2026-03-01T00:03:00.000Z");
+  assert.equal(res.body[0].resolved_at, null);
+  assert.equal(res.body[0].resolution_notes, null);
+  assert.equal(res.body[0].createdAt, undefined);
+  assert.equal(res.body[0].updatedAt, undefined);
+  assert.equal(res.body[0].dispatchedAt, undefined);
+  assert.equal(res.body[0].resolvedAt, undefined);
+  assert.equal(res.body[0].resolutionNotes, undefined);
   assert.equal(res.body[0].category, undefined);
   assert.equal(res.body[0].assignedAdminId, undefined);
   assert.equal(res.body[0].title, "Incident #9");
@@ -168,6 +178,16 @@ test("GET /admin/incidents/:id returns canonical incident payload", async (t) =>
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.incident_type, "fire");
   assert.equal(res.body.assigned_department, "Fire Station Unit");
+  assert.equal(res.body.created_at, "2026-03-01T00:00:00.000Z");
+  assert.equal(res.body.updated_at, "2026-03-01T00:05:00.000Z");
+  assert.equal(res.body.dispatched_at, "2026-03-01T00:03:00.000Z");
+  assert.equal(res.body.resolved_at, null);
+  assert.equal(res.body.resolution_notes, null);
+  assert.equal(res.body.createdAt, undefined);
+  assert.equal(res.body.updatedAt, undefined);
+  assert.equal(res.body.dispatchedAt, undefined);
+  assert.equal(res.body.resolvedAt, undefined);
+  assert.equal(res.body.resolutionNotes, undefined);
   assert.equal(res.body.category, undefined);
   assert.equal(res.body.assignedAdminId, undefined);
   assert.equal(res.body.image_url, "/admin/incidents/12/images/9");
@@ -410,13 +430,26 @@ test("PATCH /admin/incidents/:id accepts assigned_department and returns canonic
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.incident_type, "fire");
   assert.equal(res.body.assigned_department, "Fire Station Unit");
+  assert.equal(res.body.created_at, "2026-03-01T00:00:00.000Z");
+  assert.equal(res.body.updated_at, "2026-03-01T00:05:00.000Z");
+  assert.equal(res.body.dispatched_at, "2026-03-01T00:03:00.000Z");
+  assert.equal(res.body.resolved_at, null);
+  assert.equal(res.body.resolution_notes, null);
+  assert.equal(res.body.createdAt, undefined);
+  assert.equal(res.body.updatedAt, undefined);
+  assert.equal(res.body.dispatchedAt, undefined);
+  assert.equal(res.body.resolvedAt, undefined);
+  assert.equal(res.body.resolutionNotes, undefined);
   assert.equal(res.body.image_url, null);
   assert.equal(res.body.assignedAdminId, undefined);
   assert.equal(res.body.category, undefined);
+  assert.notEqual(res.body.updated_at, res.body.created_at);
   assert.equal(
     queries.some(
       (entry) =>
-        /UPDATE incident_reports/i.test(entry.sql) && /assigned_department = \$\d+/i.test(entry.sql)
+        /UPDATE incident_reports/i.test(entry.sql) &&
+        /assigned_department = \$\d+/i.test(entry.sql) &&
+        /updated_at = NOW\(\)/i.test(entry.sql)
     ),
     true
   );
@@ -492,11 +525,106 @@ test("PATCH /admin/incidents/:id accepts assignedDepartment alias", async (t) =>
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.assigned_department, "Emergency Medical Unit");
+  assert.equal(res.body.created_at, "2026-03-01T00:00:00.000Z");
+  assert.equal(res.body.updated_at, "2026-03-01T00:05:00.000Z");
+  assert.equal(res.body.dispatched_at, null);
+  assert.equal(res.body.resolved_at, null);
+  assert.equal(res.body.resolution_notes, null);
+  assert.equal(res.body.createdAt, undefined);
+  assert.equal(res.body.updatedAt, undefined);
+  assert.equal(res.body.dispatchedAt, undefined);
+  assert.equal(res.body.resolvedAt, undefined);
+  assert.equal(res.body.resolutionNotes, undefined);
   assert.equal(res.body.image_url, null);
   assert.equal(
     queries.some(
       (entry) =>
         /UPDATE incident_reports/i.test(entry.sql) && /assigned_department = \$\d+/i.test(entry.sql)
+    ),
+    true
+  );
+});
+
+test("PATCH /admin/incidents/:id includes resolution_notes when status is resolved", async (t) => {
+  const originalConnect = pool.connect;
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.connect = originalConnect;
+    pool.query = originalQuery;
+  });
+
+  const queries = [];
+  const client = {
+    async query(sql, params) {
+      queries.push({ sql: String(sql), params });
+
+      if (/^BEGIN$/i.test(String(sql).trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      if (/FROM incident_reports/i.test(String(sql)) && /WHERE id = \$1/i.test(String(sql))) {
+        return {
+          rowCount: 1,
+          rows: [{ id: 11, status: "in_progress", dispatched_at: "2026-03-01T00:03:00.000Z", resolved_at: null }]
+        };
+      }
+      if (/UPDATE incident_reports/i.test(String(sql))) {
+        return { rowCount: 1, rows: [{ id: 11 }] };
+      }
+      if (/^COMMIT$/i.test(String(sql).trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      throw new Error(`Unexpected query in test: ${sql}`);
+    },
+    release() {}
+  };
+
+  pool.connect = async () => client;
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [
+      {
+        id: 11,
+        user_id: 4,
+        incident_type: "medical",
+        assigned_department: "Emergency Medical Unit",
+        description: "Resolved medical response",
+        latitude: null,
+        longitude: null,
+        address: null,
+        priority: "high",
+        status: "resolved",
+        created_at: "2026-03-01T00:00:00.000Z",
+        updated_at: "2026-03-01T00:18:00.000Z",
+        dispatched_at: "2026-03-01T00:03:00.000Z",
+        resolved_at: "2026-03-01T00:18:00.000Z",
+        resolution_notes: "Patient transported and scene cleared.",
+        images: []
+      }
+    ]
+  });
+
+  const stack = getRoute("/admin/incidents/:id", "patch");
+  const handler = stack[stack.length - 1].handle;
+  const req = {
+    params: { id: "11" },
+    body: { status: "resolved", resolutionNotes: "Patient transported and scene cleared." }
+  };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.status, "resolved");
+  assert.equal(res.body.resolution_notes, "Patient transported and scene cleared.");
+  assert.equal(res.body.resolved_at, "2026-03-01T00:18:00.000Z");
+  assert.equal(res.body.updated_at, "2026-03-01T00:18:00.000Z");
+  assert.equal(res.body.resolutionNotes, undefined);
+  assert.equal(
+    queries.some(
+      (entry) =>
+        /UPDATE incident_reports/i.test(entry.sql) &&
+        /resolved_at = NOW\(\)/i.test(entry.sql) &&
+        /updated_at = NOW\(\)/i.test(entry.sql)
     ),
     true
   );

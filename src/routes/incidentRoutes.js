@@ -13,6 +13,52 @@ const INCIDENT_DEPARTMENTS = [
   "Police Personnel",
   "Traffic Enforcement Unit"
 ];
+const IS_DEBUG_LOG = String(process.env.LOG_LEVEL || "").toLowerCase() === "debug";
+
+function logDebug(event, payload) {
+  if (!IS_DEBUG_LOG) {
+    return;
+  }
+  console.debug(`[incident-routes] ${event}`, payload);
+}
+
+async function notifyAdminsAboutIncident({ incidentId, incidentType }) {
+  const title = "New Incident Report";
+  const safeIncidentType =
+    typeof incidentType === "string" && incidentType.trim()
+      ? incidentType.trim()
+      : "incident";
+  const message = `A new ${safeIncidentType} incident was reported.`;
+
+  const insertResult = await pool.query(
+    `
+    INSERT INTO notifications (
+      recipient_admin_id, type, title, message, metadata, is_read, created_at
+    )
+    SELECT
+      a.id,
+      'incident',
+      $1,
+      $2,
+      jsonb_build_object('reference_id', $3::bigint, 'incident_id', $3::bigint),
+      false,
+      NOW()
+    FROM admins a
+    WHERE a.status = 'active'
+    `,
+    [title, message, Number(incidentId)]
+  );
+  logDebug("notifications.insert", {
+    incidentId: Number(incidentId),
+    incidentType: safeIncidentType,
+    recipientCount: insertResult.rowCount ?? 0
+  });
+  if ((insertResult.rowCount ?? 0) === 0) {
+    console.warn("[incident-routes] No active admin recipients for incident notification", {
+      incidentId: Number(incidentId)
+    });
+  }
+}
 
 function parsePositiveInt(value) {
   const num = Number(value);
@@ -75,6 +121,7 @@ function toIncidentDto(row, { isAdminRoute = false } = {}) {
     toIncidentImageUrl(Number(row.id), item.id, isAdminRoute)
   );
 
+  // Canonical incident response uses snake_case for lifecycle timestamps and resolution fields.
   return {
     id: Number(row.id),
     title: `Incident #${row.id}`,
@@ -88,12 +135,12 @@ function toIncidentDto(row, { isAdminRoute = false } = {}) {
       longitude: row.longitude == null ? null : Number(row.longitude),
       address: row.address ?? null
     },
-    createdAt: toIso(row.created_at),
-    updatedAt: toIso(row.updated_at),
-    dispatchedAt: toIso(row.dispatched_at),
-    resolvedAt: toIso(row.resolved_at),
+    created_at: toIso(row.created_at),
+    updated_at: toIso(row.updated_at),
+    dispatched_at: toIso(row.dispatched_at),
+    resolved_at: toIso(row.resolved_at),
     reportedByUserId: row.user_id == null ? null : Number(row.user_id),
-    resolutionNotes: row.resolution_notes ?? null,
+    resolution_notes: row.resolution_notes ?? null,
     image_url: imageUrls[0] ?? null,
     images: imageUrls
   };
@@ -695,6 +742,23 @@ router.post("/incidents", requireAppAuth, async (req, res) => {
     }
 
     await client.query("COMMIT");
+    logDebug("create.completed", {
+      incidentId: Number(incidentReport.id),
+      userId: Number(userId),
+      incidentType: incidentReport.incident_type
+    });
+    try {
+      await notifyAdminsAboutIncident({
+        incidentId: incidentReport.id,
+        incidentType: incidentReport.incident_type,
+      });
+    } catch (notifyErr) {
+      // Best-effort notification fan-out should not block incident creation flow.
+      console.error("Incident admin notification insert failed:", notifyErr?.message || notifyErr, {
+        code: notifyErr?.code,
+        incidentId: Number(incidentReport.id)
+      });
+    }
     return res.status(201).json({
       ...incidentReport,
       images_count: parsedImages.length

@@ -50,7 +50,8 @@ test("PATCH /admin/users/:id returns 200 for full_name update", async (t) => {
         full_name: "Updated Name",
         phone_number: "+10000000001",
         role: "student",
-        profile_image_url: null
+        profile_image_url: null,
+        status: "active"
       }
     ]
   });
@@ -71,7 +72,8 @@ test("PATCH /admin/users/:id returns 200 for full_name update", async (t) => {
     full_name: "Updated Name",
     phone_number: "+10000000001",
     role: "student",
-    profile_image_url: null
+    profile_image_url: null,
+    status: "active"
   });
 });
 
@@ -93,7 +95,8 @@ test("PATCH /admin/users/:id lowercases email and returns 200", async (t) => {
           full_name: "Name Six",
           phone_number: null,
           role: "student",
-          profile_image_url: null
+          profile_image_url: null,
+          status: "active"
         }
       ]
     };
@@ -127,7 +130,8 @@ test("PATCH /admin/users/:id returns 200 for updating both fields", async (t) =>
         full_name: "Both Fields",
         phone_number: null,
         role: "student",
-        profile_image_url: null
+        profile_image_url: null,
+        status: "active"
       }
     ]
   });
@@ -173,7 +177,171 @@ test("PATCH /admin/users/:id returns 422 for empty body", async () => {
   assert.equal(res.statusCode, 422);
   assert.deepEqual(res.body, {
     message: "Validation failed",
-    errors: { body: ["At least one of full_name or email is required"] }
+    errors: { body: ["At least one of full_name, email, or status is required"] }
+  });
+});
+
+test("PATCH /admin/users/:id returns 200 for status update when admin personnel exists", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (sql, values) => {
+    if (sql.includes("UPDATE admins a")) {
+      assert.equal(values[0], "deactivated");
+      assert.equal(values[1], 10);
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 10,
+            email: "personnel10@example.com",
+            full_name: "Personnel Ten",
+            created_at: "2026-03-01T00:00:00.000Z",
+            status: "deactivated"
+          }
+        ]
+      };
+    }
+    throw new Error(`Unexpected SQL in test: ${sql}`);
+  };
+
+  const req = {
+    params: { id: "10" },
+    body: { status: "deactivated" }
+  };
+  const res = createRes();
+
+  await patchAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.id, 10);
+  assert.equal(res.body.role, "personnel");
+  assert.equal(res.body.email, "personnel10@example.com");
+  assert.equal(res.body.status, "deactivated");
+});
+
+test("PATCH /admin/users/:id falls back to users when admin id does not exist", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (sql, values) => {
+    if (sql.includes("UPDATE admins a")) {
+      return { rowCount: 0, rows: [] };
+    }
+    if (sql.includes("SELECT a.id, lower(r.name) AS role")) {
+      return { rowCount: 0, rows: [] };
+    }
+    if (sql.includes("UPDATE users")) {
+      assert.equal(values[0], "deactivated");
+      assert.equal(values[1], 10);
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 10,
+            firebase_uid: "uid-10",
+            email: "user10@example.com",
+            full_name: "User Ten",
+            phone_number: null,
+            role: "student",
+            profile_image_url: null,
+            status: "deactivated"
+          }
+        ]
+      };
+    }
+    throw new Error(`Unexpected SQL in test: ${sql}`);
+  };
+
+  const req = {
+    params: { id: "10" },
+    body: { status: "deactivated" }
+  };
+  const res = createRes();
+
+  await patchAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.role, "student");
+  assert.equal(res.body.status, "deactivated");
+});
+
+test("PATCH /admin/users/:id returns 409 when target admin is not personnel", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (sql) => {
+    if (sql.includes("UPDATE admins a")) {
+      return { rowCount: 0, rows: [] };
+    }
+    if (sql.includes("SELECT a.id, lower(r.name) AS role")) {
+      return { rowCount: 1, rows: [{ id: 10, role: "admin" }] };
+    }
+    throw new Error(`Unexpected SQL in test: ${sql}`);
+  };
+
+  const req = {
+    params: { id: "10" },
+    body: { status: "deactivated" }
+  };
+  const res = createRes();
+
+  await patchAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body, { message: "Only personnel accounts can be deactivated/reactivated" });
+});
+
+test("PATCH /admin/users/:id returns 404 when status target is missing in both admins and users", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (sql) => {
+    if (sql.includes("UPDATE admins a")) {
+      return { rowCount: 0, rows: [] };
+    }
+    if (sql.includes("SELECT a.id, lower(r.name) AS role")) {
+      return { rowCount: 0, rows: [] };
+    }
+    if (sql.includes("UPDATE users")) {
+      return { rowCount: 0, rows: [] };
+    }
+    throw new Error(`Unexpected SQL in test: ${sql}`);
+  };
+
+  const req = {
+    params: { id: "9999" },
+    body: { status: "deactivated" }
+  };
+  const res = createRes();
+
+  await patchAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(res.body, { message: "User not found" });
+});
+
+test("PATCH /admin/users/:id returns 422 for invalid status", async () => {
+  const req = {
+    params: { id: "10" },
+    body: { status: "paused" }
+  };
+  const res = createRes();
+
+  await patchAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 422);
+  assert.deepEqual(res.body, {
+    message: "Validation failed",
+    errors: { status: ['Must be "active" or "deactivated"'] }
   });
 });
 

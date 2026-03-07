@@ -5,6 +5,27 @@ import { pool } from "../db.js";
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 
 const router = express.Router();
+const DEACTIVATED_MESSAGE = "Account is deactivated";
+
+export function assertAccountActive(account) {
+  if (account?.status === "deactivated") {
+    return { ok: false, statusCode: 403, message: DEACTIVATED_MESSAGE };
+  }
+  return { ok: true };
+}
+
+export async function getAdminAuthAccount(adminId) {
+  const result = await pool.query(
+    `
+    SELECT id, status
+    FROM admins
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [adminId]
+  );
+  return result.rows[0] ?? null;
+}
 
 export async function getAdminPermissions(adminId) {
   const result = await pool.query(
@@ -33,6 +54,15 @@ export async function requireAuth(req, res, next) {
     const parsedAdminId = Number(decoded.adminId ?? decoded.sub);
     if (!Number.isInteger(parsedAdminId) || parsedAdminId <= 0) {
       return res.status(401).json({ message: "Invalid or expired token" });
+    }
+
+    const account = await getAdminAuthAccount(parsedAdminId);
+    if (!account) {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+    const activeCheck = assertAccountActive(account);
+    if (!activeCheck.ok) {
+      return res.status(activeCheck.statusCode).json({ message: activeCheck.message });
     }
 
     req.admin = {

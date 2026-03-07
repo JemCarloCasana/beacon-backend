@@ -21,6 +21,13 @@ import {
 } from "../services/sosLiveOps.js";
 
 const router = express.Router();
+const MAX_NOTE_LENGTH = 1000;
+const VALID_ASSIGNED_UNITS = new Set([
+  "Emergency Medical Unit",
+  "Fire Station Unit",
+  "Police Personnel",
+  "Traffic Enforcement Unit"
+]);
 
 function parsePositiveInt(value) {
   const num = Number(value);
@@ -37,11 +44,26 @@ function parseOptionalNote(body) {
   if (typeof body.note !== "string") {
     return { error: "note must be a string" };
   }
-  const trimmed = body.note.trim();
+  const sanitized = body.note.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, "");
+  const trimmed = sanitized.trim();
   if (!trimmed) {
     return null;
   }
+  if (trimmed.length > MAX_NOTE_LENGTH) {
+    return { error: `note must be ${MAX_NOTE_LENGTH} characters or less` };
+  }
   return trimmed;
+}
+
+function parseAssignedUnit(body) {
+  const value = typeof body?.assigned_unit === "string" ? body.assigned_unit.trim() : "";
+  if (!value) {
+    return { error: "assigned_unit is required" };
+  }
+  if (!VALID_ASSIGNED_UNITS.has(value)) {
+    return { error: "Invalid assigned_unit" };
+  }
+  return value;
 }
 
 function buildActionResponse(thread) {
@@ -50,9 +72,12 @@ function buildActionResponse(thread) {
     sos_id: thread.sos_id,
     latest_status: thread.latest_status,
     acknowledged_at: thread.acknowledged_at,
+    acknowledgedAt: thread.acknowledged_at,
     admin_acknowledged_at: thread.acknowledged_at,
     acknowledged_by_admin_id: thread.acknowledged_by_admin_id,
     admin_acknowledged_by_admin_id: thread.acknowledged_by_admin_id,
+    assigned_unit: thread.assigned_unit ?? null,
+    assignedUnit: thread.assignedUnit ?? thread.assigned_unit ?? null,
     emergency_category: thread.emergency_category,
     requires_attention: Boolean(thread.requires_attention),
     latest_event_at: thread.latest_event_at
@@ -146,6 +171,10 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, async (req, res) 
   if (note?.error) {
     return res.status(400).json({ message: note.error });
   }
+  const assignedUnit = parseAssignedUnit(req.body);
+  if (assignedUnit?.error) {
+    return res.status(400).json({ message: assignedUnit.error });
+  }
 
   const client = await pool.connect();
 
@@ -163,22 +192,17 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, async (req, res) 
       return res.status(409).json({ message: "SOS thread is already resolved" });
     }
 
-    if (latest.acknowledged_at) {
-      await client.query("ROLLBACK");
-      const current = await getThreadStateAnyStatus(sosId);
-      return res.json(buildActionResponse(current));
-    }
-
     await client.query(
       `
       UPDATE sos_threads
       SET
         acknowledged_at = NOW(),
         acknowledged_by_admin_id = $2,
+        assigned_unit = $3,
         updated_at = NOW()
       WHERE id = $1
       `,
-      [latest.thread_id, Number(req.admin.adminId)]
+      [latest.thread_id, Number(req.admin.adminId), assignedUnit]
     );
 
     await appendAdminStatusEvent(client, {

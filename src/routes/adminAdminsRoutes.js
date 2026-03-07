@@ -5,8 +5,10 @@ import { requireAuth, requirePermission } from "../middleware/adminAuth.js"; // 
 
 const router = express.Router();
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ADMIN_USER_PATCH_ALLOWED_FIELDS = ["full_name", "email"];
+const ADMIN_USER_PATCH_ALLOWED_FIELDS = ["full_name", "email", "status"];
 const ADMIN_ACCOUNT_PATCH_ALLOWED_FIELDS = ["full_name", "email"];
+const ACCOUNT_STATUSES = ["active", "deactivated"];
+const ADMIN_LIST_STATUSES = ["active", "deactivated", "all"];
 const ADMIN_USER_RETURN_FIELDS = `
   id,
   firebase_uid,
@@ -14,8 +16,73 @@ const ADMIN_USER_RETURN_FIELDS = `
   full_name,
   phone_number,
   role,
-  profile_image_url
+  profile_image_url,
+  status
 `;
+const ADMIN_STATUS_BRIDGE_RETURN_FIELDS = `
+  id,
+  email,
+  full_name,
+  created_at,
+  status
+`;
+const IS_DEBUG_LOG = String(process.env.LOG_LEVEL || "").toLowerCase() === "debug";
+
+function logDebug(event, payload) {
+  if (!IS_DEBUG_LOG) {
+    return;
+  }
+  console.debug(`[admin-admins] ${event}`, payload);
+}
+
+function applyNotificationNoStoreHeaders(res) {
+  res.set("Cache-Control", "no-store, private, max-age=0");
+  res.set("Pragma", "no-cache");
+  res.set("Vary", "Authorization");
+  res.set("Expires", "0");
+}
+
+function normalizeNotificationMetadata(metadata) {
+  if (metadata == null) {
+    return {};
+  }
+
+  let normalized = metadata;
+  if (typeof metadata === "string") {
+    try {
+      normalized = JSON.parse(metadata);
+    } catch {
+      return {};
+    }
+  }
+
+  if (typeof normalized !== "object" || Array.isArray(normalized)) {
+    return {};
+  }
+
+  const adminRequestIdRaw = normalized.admin_request_id;
+  if (adminRequestIdRaw != null) {
+    const adminRequestId = Number(adminRequestIdRaw);
+    if (Number.isInteger(adminRequestId) && adminRequestId > 0) {
+      return {
+        ...normalized,
+        admin_request_id: adminRequestId,
+      };
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeNotificationRow(row) {
+  if (!row || typeof row !== "object") {
+    return row;
+  }
+  return {
+    ...row,
+    metadata: normalizeNotificationMetadata(row.metadata),
+  };
+}
 
 function buildValidationError(errors) {
   return { message: "Validation failed", errors };
@@ -41,7 +108,7 @@ function validateAdminUserPatchPayload(body) {
   }
 
   if (!ADMIN_USER_PATCH_ALLOWED_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
-    addFieldError(errors, "body", "At least one of full_name or email is required");
+    addFieldError(errors, "body", "At least one of full_name, email, or status is required");
   }
 
   if (Object.prototype.hasOwnProperty.call(payload, "full_name")) {
@@ -68,6 +135,20 @@ function validateAdminUserPatchPayload(body) {
         addFieldError(errors, "email", "Invalid email format");
       } else {
         normalized.email = normalizedEmail;
+      }
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "status")) {
+    const status = payload.status;
+    if (typeof status !== "string") {
+      addFieldError(errors, "status", 'Must be "active" or "deactivated"');
+    } else {
+      const normalizedStatus = status.trim().toLowerCase();
+      if (!ACCOUNT_STATUSES.includes(normalizedStatus)) {
+        addFieldError(errors, "status", 'Must be "active" or "deactivated"');
+      } else {
+        normalized.status = normalizedStatus;
       }
     }
   }
@@ -132,12 +213,22 @@ router.get(
   requirePermission("manage_users"),
   async (req, res) => {
     try {
+      const statusFilterRaw = typeof req.query?.status === "string" ? req.query.status.trim().toLowerCase() : "all";
+      const statusFilter = statusFilterRaw.length > 0 ? statusFilterRaw : "all";
+      if (!ADMIN_LIST_STATUSES.includes(statusFilter)) {
+        return res.status(400).json({ message: "Invalid status filter" });
+      }
+
+      const whereClause = statusFilter === "all" ? "" : "WHERE status = $1";
+      const values = statusFilter === "all" ? [] : [statusFilter];
       const result = await pool.query(
         `
-        SELECT id, email, full_name, role_id, created_at
+        SELECT id, email, full_name, role_id, created_at, status
         FROM admins
+        ${whereClause}
         ORDER BY created_at DESC
-        `
+        `,
+        values
       );
 
       return res.json(result.rows);
@@ -172,6 +263,55 @@ router.patch(
         return res.status(422).json(buildValidationError(errors));
       }
 
+      // Compatibility bridge: frontend uses admin/personnel IDs from /admin/admins.
+      // For status updates, resolve in admins first (personnel-only), then fallback to users.
+      if (Object.prototype.hasOwnProperty.call(normalized, "status")) {
+        const adminStatusResult = await pool.query(
+          `
+          UPDATE admins a
+          SET status = $1
+          WHERE a.id = $2
+            AND EXISTS (
+              SELECT 1
+              FROM roles r
+              WHERE r.id = a.role_id
+                AND lower(r.name) = 'personnel'
+            )
+          RETURNING ${ADMIN_STATUS_BRIDGE_RETURN_FIELDS}
+          `,
+          [normalized.status, userId]
+        );
+
+        if (adminStatusResult.rowCount > 0) {
+          const adminRow = adminStatusResult.rows[0];
+          return res.json({
+            id: adminRow.id,
+            firebase_uid: null,
+            email: adminRow.email,
+            full_name: adminRow.full_name,
+            phone_number: null,
+            role: "personnel",
+            profile_image_url: null,
+            status: adminRow.status,
+          });
+        }
+
+        const adminLookupResult = await pool.query(
+          `
+          SELECT a.id, lower(r.name) AS role
+          FROM admins a
+          JOIN roles r ON r.id = a.role_id
+          WHERE a.id = $1
+          LIMIT 1
+          `,
+          [userId]
+        );
+
+        if (adminLookupResult.rowCount > 0) {
+          return res.status(409).json({ message: "Only personnel accounts can be deactivated/reactivated" });
+        }
+      }
+
       const updates = [];
       const values = [];
 
@@ -182,6 +322,10 @@ router.patch(
       if (Object.prototype.hasOwnProperty.call(normalized, "email")) {
         values.push(normalized.email);
         updates.push(`email = $${values.length}`);
+      }
+      if (Object.prototype.hasOwnProperty.call(normalized, "status")) {
+        values.push(normalized.status);
+        updates.push(`status = $${values.length}`);
       }
 
       values.push(userId);
@@ -274,48 +418,16 @@ router.patch(
 
 /**
  * DELETE /admin/admins/:id
- * Deletes an admin/personnel account by id.
+ * Disabled to prevent permanent deletion. Use PATCH status updates instead.
  */
 router.delete(
   "/admin/admins/:id",
   requireAuth,
   requirePermission("manage_admins"),
   async (req, res) => {
-    try {
-      const targetAdminId = Number(req.params.id);
-      const requestingAdminId = Number(req.admin?.adminId);
-
-      if (!Number.isInteger(targetAdminId) || targetAdminId <= 0) {
-        return res.status(400).json({ message: "Invalid admin id" });
-      }
-      if (!Number.isInteger(requestingAdminId) || requestingAdminId <= 0) {
-        return res.status(401).json({ message: "Unauthorized" });
-      }
-      if (targetAdminId === requestingAdminId) {
-        return res.status(409).json({ message: "You cannot delete your own account" });
-      }
-
-      const deleteResult = await pool.query(
-        `
-        DELETE FROM admins
-        WHERE id = $1
-        RETURNING id, email, full_name, role_id, created_at
-        `,
-        [targetAdminId]
-      );
-
-      if (deleteResult.rowCount === 0) {
-        return res.status(404).json({ message: "Admin not found" });
-      }
-
-      return res.json({
-        message: "Admin deleted successfully",
-        admin: deleteResult.rows[0],
-      });
-    } catch (err) {
-      console.error("DELETE /admin/admins/:id error:", err);
-      return res.status(500).json({ message: "Server error" });
-    }
+    return res.status(410).json({
+      message: "Admin deletion is disabled. Use PATCH /admin/users/:id with status=deactivated or status=active.",
+    });
   }
 );
 
@@ -355,6 +467,7 @@ router.get(
  */
 router.get("/admin/notifications", requireAuth, async (req, res) => {
   try {
+    applyNotificationNoStoreHeaders(res);
     const adminId = Number(req.admin?.adminId);
     if (!Number.isInteger(adminId) || adminId <= 0) {
       return res.status(401).json({ message: "Unauthorized" });
@@ -369,8 +482,15 @@ router.get("/admin/notifications", requireAuth, async (req, res) => {
       `,
       [adminId]
     );
-
-    return res.json(notificationsResult.rows);
+    logDebug("notifications.list", {
+      currentAdminId: adminId,
+      resultCount: notificationsResult.rowCount,
+    });
+    if (IS_DEBUG_LOG) {
+      res.set("X-Current-Admin-Id", String(adminId));
+      res.set("X-Notifications-Count", String(notificationsResult.rowCount ?? 0));
+    }
+    return res.json(notificationsResult.rows.map(normalizeNotificationRow));
   } catch (err) {
     console.error("GET /admin/notifications error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -433,23 +553,40 @@ router.post(
       );
 
       const adminRequest = insertResult.rows[0];
-      await client.query(
+      const adminRequestId = Number(adminRequest?.id);
+      if (!Number.isInteger(adminRequestId) || adminRequestId <= 0) {
+        throw new Error("Failed to resolve admin request id for notification metadata");
+      }
+      const recipientAdminId = Number(personnelId);
+      if (!Number.isInteger(recipientAdminId) || recipientAdminId <= 0) {
+        throw new Error("Invalid recipient_admin_id for notification insert");
+      }
+      const notificationTitle = "Admin Access Request".trim() || "Notification";
+      const notificationInsertResult = await client.query(
         `
         INSERT INTO notifications (
           recipient_admin_id, type, title, message, metadata, is_read, created_at
         ) VALUES ($1, $2, $3, $4, $5::jsonb, false, NOW())
+        RETURNING id
         `,
         [
-          personnelId,
+          recipientAdminId,
           "admin_request",
-          "Admin Access Request",
+          notificationTitle,
           "You have received an admin access request.",
           JSON.stringify({
-            admin_request_id: adminRequest.id,
+            admin_request_id: adminRequestId,
             requested_by_admin_id: requestedByAdminId,
           }),
         ]
       );
+      const notificationId = Number(notificationInsertResult.rows?.[0]?.id ?? null);
+      logDebug("admin_request.notification_created", {
+        requesterAdminId: requestedByAdminId,
+        recipientAdminId,
+        adminRequestId,
+        notificationId: Number.isInteger(notificationId) ? notificationId : null,
+      });
 
       await client.query("COMMIT");
 
@@ -688,6 +825,7 @@ router.patch(
  */
 router.patch("/admin/notifications/:id/read", requireAuth, async (req, res) => {
   try {
+    applyNotificationNoStoreHeaders(res);
     const notificationId = Number(req.params.id);
     const adminId = Number(req.admin?.adminId);
 
@@ -714,7 +852,7 @@ router.patch("/admin/notifications/:id/read", requireAuth, async (req, res) => {
 
     return res.json({
       message: "Notification marked as read",
-      notification: updateResult.rows[0],
+      notification: normalizeNotificationRow(updateResult.rows[0]),
     });
   } catch (err) {
     console.error("PATCH /admin/notifications/:id/read error:", err);

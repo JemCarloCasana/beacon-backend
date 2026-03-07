@@ -2,7 +2,7 @@ import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../db.js";
-import { getAdminPermissions } from "../middleware/adminAuth.js";
+import { assertAccountActive, getAdminPermissions } from "../middleware/adminAuth.js";
 import {
   SIGNUP_ROLE,
   buildValidationError,
@@ -81,7 +81,7 @@ router.post("/admin/auth/login", async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT a.id, a.email, a.full_name, a.password_hash, a.role_id, r.name AS role
+      `SELECT a.id, a.email, a.full_name, a.password_hash, a.role_id, a.status, r.name AS role
        FROM admins a
        JOIN roles r ON r.id = a.role_id
        WHERE lower(a.email) = $1`,
@@ -93,6 +93,10 @@ router.post("/admin/auth/login", async (req, res) => {
     const row = result.rows[0];
     const ok = await bcrypt.compare(normalized.password, row.password_hash);
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
+    const activeCheck = assertAccountActive(row);
+    if (!activeCheck.ok) {
+      return res.status(activeCheck.statusCode).json({ message: activeCheck.message });
+    }
 
     const permissions = await getAdminPermissions(row.id);
     const token = jwt.sign(

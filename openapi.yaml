@@ -316,6 +316,12 @@ paths:
                 $ref: "#/components/schemas/AdminAuthValidationErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Account is deactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /admin/me:
     get:
@@ -331,15 +337,36 @@ paths:
                 $ref: "#/components/schemas/AdminMeResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Account is deactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /admin/admins:
     get:
       summary: List admin/personnel accounts
       security:
         - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [active, deactivated, all]
       responses:
         "200":
           description: Admin list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AdminAccountDto"
+        "400":
+          $ref: "#/components/responses/BadRequest"
 
   /admin/admins/{id}:
     patch:
@@ -352,18 +379,22 @@ paths:
         "200":
           description: Updated admin
     delete:
-      summary: Delete admin account
+      summary: Delete admin account (disabled)
+      deprecated: true
       security:
         - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/PathId"
       responses:
-        "200":
-          description: Deleted
+        "410":
+          description: Deletion disabled. Use status update flow.
 
   /admin/users/{id}:
     patch:
       summary: Admin updates user profile by id
+      description: |
+        Supports profile updates for app users. For `status` updates, this route applies an admins-first
+        compatibility bridge for personnel-list IDs, then falls back to users when no admin row exists.
       security:
         - bearerAuth: []
       parameters:
@@ -955,6 +986,28 @@ components:
           type: string
           format: uri
           nullable: true
+        status:
+          type: string
+          enum: [active, deactivated]
+
+    AdminAccountDto:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+        role_id:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [active, deactivated]
 
     PatchMeRequest:
       type: object
@@ -985,6 +1038,9 @@ components:
         email:
           type: string
           format: email
+        status:
+          type: string
+          enum: [active, deactivated]
       minProperties: 1
 
     CreateSosRequest:

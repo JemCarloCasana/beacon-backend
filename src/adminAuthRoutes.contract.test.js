@@ -203,6 +203,7 @@ test("login accepts valid credentials and returns token", async (t) => {
             full_name: "Valid Admin",
             password_hash: passwordHash,
             role_id: 1,
+            status: "active",
             role: "personnel"
           }
         ]
@@ -228,6 +229,42 @@ test("login accepts valid credentials and returns token", async (t) => {
   assert.equal(typeof res.body.token, "string");
   assert.equal(res.body.admin.id, 17);
   assert.deepEqual(res.body.admin.permissions, ["manage_users"]);
+});
+
+test("login rejects deactivated account with 403", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  const passwordHash = await bcrypt.hash("Abcdef123!", 12);
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [
+      {
+        id: 18,
+        email: "deactivated@example.com",
+        full_name: "Deactivated User",
+        password_hash: passwordHash,
+        role_id: 2,
+        status: "deactivated",
+        role: "personnel"
+      }
+    ]
+  });
+
+  const req = {
+    body: {
+      email: "deactivated@example.com",
+      password: "Abcdef123!"
+    }
+  };
+  const res = createRes();
+
+  await loginHandler(req, res);
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, { message: "Account is deactivated" });
 });
 
 test("/admin/me returns 401 without token", async () => {
@@ -270,10 +307,14 @@ test("/admin/me returns role and permissions for valid token", async (t) => {
     { expiresIn: "1h" }
   );
 
-  let callIndex = 0;
-  pool.query = async () => {
-    callIndex += 1;
-    if (callIndex === 1) {
+  pool.query = async (sql) => {
+    if (sql.includes("SELECT id, status")) {
+      return {
+        rowCount: 1,
+        rows: [{ id: 5, status: "active" }]
+      };
+    }
+    if (sql.includes("SELECT a.id, a.email, a.full_name, a.role_id, r.name AS role")) {
       return {
         rowCount: 1,
         rows: [{ id: 5, email: "p@example.com", full_name: "P User", role_id: 2, role: "personnel" }]
@@ -298,4 +339,38 @@ test("/admin/me returns role and permissions for valid token", async (t) => {
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.role, "personnel");
   assert.deepEqual(res.body.permissions, ["manage_reports"]);
+});
+
+test("/admin/me middleware returns 403 for deactivated account", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  const token = jwt.sign(
+    { sub: "6", role: "personnel", roleId: 2 },
+    process.env.ADMIN_JWT_SECRET,
+    { expiresIn: "1h" }
+  );
+
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [{ id: 6, status: "deactivated" }]
+  });
+
+  const req = {
+    headers: {
+      authorization: `Bearer ${token}`
+    }
+  };
+  const res = createRes();
+  let nextCalled = false;
+
+  await adminMeAuthMiddleware(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(nextCalled, false);
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, { message: "Account is deactivated" });
 });

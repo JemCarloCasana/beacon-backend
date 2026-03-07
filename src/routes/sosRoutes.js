@@ -6,6 +6,49 @@ import { publishSosDeltaBySosId } from "../services/sosLiveOps.js";
 
 const router = express.Router();
 const SOS_CATEGORIES = new Set(["medical", "fire", "violence", "unknown"]);
+const IS_DEBUG_LOG = String(process.env.LOG_LEVEL || "").toLowerCase() === "debug";
+
+function logDebug(event, payload) {
+  if (!IS_DEBUG_LOG) {
+    return;
+  }
+  console.debug(`[sos-routes] ${event}`, payload);
+}
+
+async function notifyAdminsAboutSos({ sosId, fullName, category }) {
+  const alertTitle = "New SOS Alert";
+  const senderName = typeof fullName === "string" && fullName.trim() ? fullName.trim() : "Unknown";
+  const alertMessage = `${senderName} created an SOS (${category}).`;
+
+  const insertResult = await pool.query(
+    `
+    INSERT INTO notifications (
+      recipient_admin_id, type, title, message, metadata, is_read, created_at
+    )
+    SELECT
+      a.id,
+      'sos',
+      $1,
+      $2,
+      jsonb_build_object('reference_id', $3::bigint, 'sos_id', $3::bigint),
+      false,
+      NOW()
+    FROM admins a
+    WHERE a.status = 'active'
+    `,
+    [alertTitle, alertMessage, Number(sosId)]
+  );
+  logDebug("notifications.insert", {
+    sosId: Number(sosId),
+    category,
+    recipientCount: insertResult.rowCount ?? 0
+  });
+  if ((insertResult.rowCount ?? 0) === 0) {
+    console.warn("[sos-routes] No active admin recipients for SOS notification", {
+      sosId: Number(sosId)
+    });
+  }
+}
 
 router.post("/sos", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
@@ -122,6 +165,24 @@ router.post("/sos", requireAppAuth, async (req, res) => {
   publishSosDeltaBySosId(sosId).catch((err) => {
     console.error("publish SOS delta error:", err);
   });
+  logDebug("create.completed", {
+    sosId,
+    userId,
+    category: normalizedCategory
+  });
+  try {
+    await notifyAdminsAboutSos({
+      sosId,
+      fullName,
+      category: normalizedCategory,
+    });
+  } catch (err) {
+    // Best-effort notification fan-out should not block SOS creation flow.
+    console.error("SOS admin notification insert failed:", err?.message || err, {
+      code: err?.code,
+      sosId
+    });
+  }
 
   const friendsRes = await pool.query(
     `SELECT friend_user_id

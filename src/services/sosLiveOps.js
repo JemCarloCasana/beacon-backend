@@ -80,6 +80,18 @@ function nextSseId() {
   return id;
 }
 
+function withThreadAliases(row) {
+  const acknowledgedAt = row.acknowledged_at ?? null;
+  const assignedUnit = row.assigned_unit ?? null;
+  return {
+    ...row,
+    acknowledged_at: acknowledgedAt,
+    acknowledgedAt,
+    assigned_unit: assignedUnit,
+    assignedUnit
+  };
+}
+
 export function parseLiveListParams(query) {
   const status = normalizeLiveStatus(query?.status);
   if (!status) {
@@ -141,6 +153,7 @@ export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, 
         st.latest_status,
         st.emergency_category,
         st.acknowledged_at,
+        st.assigned_unit,
         st.acknowledged_by_admin_id,
         st.resolved_at,
         root.created_at AS opened_at,
@@ -178,7 +191,7 @@ export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, 
     values
   );
 
-  const rows = result.rows;
+  const rows = result.rows.map(withThreadAliases);
   let nextCursor = null;
   if (rows.length > limit) {
     const overflow = rows[limit - 1];
@@ -214,6 +227,7 @@ export async function getThreadStateAnyStatus(sosId) {
       st.latest_status,
       st.emergency_category,
       st.acknowledged_at,
+      st.assigned_unit,
       st.acknowledged_by_admin_id,
       st.resolved_at,
       root.created_at AS opened_at,
@@ -245,7 +259,7 @@ export async function getThreadStateAnyStatus(sosId) {
     `,
     [sosId]
   );
-  return result.rowCount > 0 ? result.rows[0] : null;
+  return result.rowCount > 0 ? withThreadAliases(result.rows[0]) : null;
 }
 
 export async function listThreadEvents(sosId) {
