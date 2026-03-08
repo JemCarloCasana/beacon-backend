@@ -30,7 +30,14 @@ async function notifyAdminsAboutSos({ sosId, fullName, category }) {
       'sos',
       $1,
       $2,
-      jsonb_build_object('reference_id', $3::bigint, 'sos_id', $3::bigint),
+      jsonb_build_object(
+        'reference_id',
+        $3::bigint,
+        'sos_id',
+        $3::bigint,
+        'fallback_route',
+        '/admin/sos/' || $3::text
+      ),
       false,
       NOW()
     FROM admins a

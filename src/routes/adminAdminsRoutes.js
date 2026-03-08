@@ -60,14 +60,54 @@ function normalizeNotificationMetadata(metadata) {
     return {};
   }
 
-  const adminRequestIdRaw = normalized.admin_request_id;
-  if (adminRequestIdRaw != null) {
-    const adminRequestId = Number(adminRequestIdRaw);
-    if (Number.isInteger(adminRequestId) && adminRequestId > 0) {
-      return {
-        ...normalized,
-        admin_request_id: adminRequestId,
-      };
+  return { ...normalized };
+}
+
+function toPositiveIntegerOrNull(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function withNormalizedNotificationTargets(metadata, type) {
+  const normalized = {
+    ...metadata,
+  };
+  const adminRequestId = toPositiveIntegerOrNull(normalized.admin_request_id);
+  if (adminRequestId != null) {
+    normalized.admin_request_id = adminRequestId;
+  }
+
+  const incidentId = toPositiveIntegerOrNull(normalized.incident_id);
+  const sosId = toPositiveIntegerOrNull(normalized.sos_id);
+  const referenceId = toPositiveIntegerOrNull(normalized.reference_id);
+  if (incidentId != null) {
+    normalized.incident_id = incidentId;
+  }
+  if (sosId != null) {
+    normalized.sos_id = sosId;
+  }
+
+  if (referenceId != null) {
+    normalized.reference_id = referenceId;
+  } else if (incidentId != null) {
+    normalized.reference_id = incidentId;
+  } else if (sosId != null) {
+    normalized.reference_id = sosId;
+  }
+
+  const typeKey = String(type || "").trim().toLowerCase();
+  const fallbackRoute =
+    typeof normalized.fallback_route === "string" && normalized.fallback_route.trim()
+      ? normalized.fallback_route.trim()
+      : null;
+  if (fallbackRoute == null) {
+    if (typeKey === "incident" && normalized.incident_id != null) {
+      normalized.fallback_route = `/admin/incidents/${normalized.incident_id}`;
+    } else if (typeKey === "sos" && normalized.sos_id != null) {
+      normalized.fallback_route = `/admin/sos/${normalized.sos_id}`;
     }
   }
 
@@ -80,7 +120,7 @@ function normalizeNotificationRow(row) {
   }
   return {
     ...row,
-    metadata: normalizeNotificationMetadata(row.metadata),
+    metadata: withNormalizedNotificationTargets(normalizeNotificationMetadata(row.metadata), row.type),
   };
 }
 

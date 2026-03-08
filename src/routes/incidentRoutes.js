@@ -40,7 +40,14 @@ async function notifyAdminsAboutIncident({ incidentId, incidentType }) {
       'incident',
       $1,
       $2,
-      jsonb_build_object('reference_id', $3::bigint, 'incident_id', $3::bigint),
+      jsonb_build_object(
+        'reference_id',
+        $3::bigint,
+        'incident_id',
+        $3::bigint,
+        'fallback_route',
+        '/admin/incidents/' || $3::text
+      ),
       false,
       NOW()
     FROM admins a

@@ -345,6 +345,74 @@ test("GET /admin/notifications normalizes legacy string metadata admin_request_i
   assert.equal(res.body[0].metadata.admin_request_id, 101);
 });
 
+test("GET /admin/notifications adds incident fallback_route from legacy metadata ids", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [
+      {
+        id: 73,
+        recipient_admin_id: 55,
+        type: "incident",
+        title: "New Incident Report",
+        message: "A new fire incident was reported.",
+        metadata: { incident_id: "222", reference_id: "222" },
+        is_read: false,
+        created_at: "2026-03-07T01:02:00.000Z",
+      },
+    ],
+  });
+
+  const req = { admin: { adminId: 55 } };
+  const res = createRes();
+
+  await getNotificationsHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.length, 1);
+  assert.equal(res.body[0].metadata.incident_id, 222);
+  assert.equal(res.body[0].metadata.reference_id, 222);
+  assert.equal(res.body[0].metadata.fallback_route, "/admin/incidents/222");
+});
+
+test("GET /admin/notifications adds sos fallback_route from legacy metadata ids", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [
+      {
+        id: 74,
+        recipient_admin_id: 55,
+        type: "sos",
+        title: "New SOS Alert",
+        message: "A new SOS was created.",
+        metadata: { sos_id: "333", reference_id: "333" },
+        is_read: false,
+        created_at: "2026-03-07T01:03:00.000Z",
+      },
+    ],
+  });
+
+  const req = { admin: { adminId: 55 } };
+  const res = createRes();
+
+  await getNotificationsHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.length, 1);
+  assert.equal(res.body[0].metadata.sos_id, 333);
+  assert.equal(res.body[0].metadata.reference_id, 333);
+  assert.equal(res.body[0].metadata.fallback_route, "/admin/sos/333");
+});
+
 test("POST /admin/admin-requests inserts notification metadata with admin_request_id", async (t) => {
   const originalConnect = pool.connect;
   t.after(() => {
