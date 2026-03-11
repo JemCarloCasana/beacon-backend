@@ -31,12 +31,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [full_name]
+              required: [full_name, role]
               properties:
                 full_name:
                   type: string
                 phone_number:
                   type: string
+                role:
+                  type: string
+                  enum: [citizen, student]
       responses:
         "200":
           description: Profile upserted
@@ -267,6 +270,40 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
+  /sos/{sosId}/status:
+    patch:
+      summary: Set terminal SOS outcome
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sosId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SosStatusUpdateRequest"
+      responses:
+        "200":
+          description: SOS status updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SosStatusUpdateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
   /admin/auth/signup:
     post:
       summary: Admin/personnel signup
@@ -390,6 +427,25 @@ paths:
           description: Deletion disabled. Use status update flow.
 
   /admin/users/{id}:
+    get:
+      summary: Admin fetches user profile by id
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
     patch:
       summary: Admin updates user profile by id
       description: |
@@ -572,6 +628,12 @@ paths:
       summary: Create broadcast
       security:
         - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminCreateBroadcastRequest"
       responses:
         "201":
           description: Broadcast created
@@ -644,7 +706,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [open, active, resolved]
+            enum: [open, active, resolved, cancelled, safe]
         - name: limit
           in: query
           schema:
@@ -982,6 +1044,7 @@ components:
           nullable: true
         role:
           type: string
+          enum: [citizen, student]
         profile_image_url:
           type: string
           format: uri
@@ -1043,6 +1106,38 @@ components:
           enum: [active, deactivated]
       minProperties: 1
 
+    AdminCreateBroadcastRequest:
+      type: object
+      required: [title, body, severity, audience_type]
+      properties:
+        title:
+          type: string
+        body:
+          type: string
+        severity:
+          type: string
+          enum: [info, medium, high, critical]
+        audience_type:
+          type: string
+          enum: [all, role]
+        audience_roles:
+          type: array
+          description: Preferred audience selector for audience_type=role.
+          items:
+            type: string
+            enum: [citizen, student]
+        audience_role_ids:
+          type: array
+          description: Deprecated fallback audience selector; prefer audience_roles.
+          deprecated: true
+          items:
+            type: integer
+            minimum: 1
+      description: |
+        For `audience_type=role`, send `audience_roles` as the primary field.
+        `audience_role_ids` is accepted as a deprecated compatibility fallback.
+        If both are provided, `audience_roles` takes precedence.
+
     CreateSosRequest:
       type: object
       required: [category]
@@ -1062,6 +1157,35 @@ components:
         category:
           type: string
           enum: [medical, fire, violence, unknown]
+
+    SosStatusUpdateRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [cancelled, safe]
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+        source:
+          type: string
+          enum: [android]
+          nullable: true
+
+    SosStatusUpdateResponse:
+      type: object
+      required: [sos_id, status, resolved_at]
+      properties:
+        sos_id:
+          type: string
+        status:
+          type: string
+          enum: [cancelled, safe]
+        resolved_at:
+          type: string
+          format: date-time
 
     SosThread:
       type: object
@@ -1124,6 +1248,14 @@ components:
         resolved_at:
           type: string
           format: date-time
+          nullable: true
+        terminal_status:
+          type: string
+          enum: [cancelled, safe]
+          nullable: true
+        resolved_source:
+          type: string
+          enum: [android]
           nullable: true
 
     SosEvent:

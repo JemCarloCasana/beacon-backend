@@ -30,9 +30,126 @@ function createRes() {
 }
 
 const adminUsersPatchStack = findRouteLayer("/admin/users/:id", "patch");
+const adminUsersGetStack = findRouteLayer("/admin/users/:id", "get");
+const getAdminUserAuthMiddleware = adminUsersGetStack[0].handle;
+const getAdminUserPermissionMiddleware = adminUsersGetStack[1].handle;
+const getAdminUserHandler = adminUsersGetStack[adminUsersGetStack.length - 1].handle;
 const patchAdminUserAuthMiddleware = adminUsersPatchStack[0].handle;
 const patchAdminUserPermissionMiddleware = adminUsersPatchStack[1].handle;
 const patchAdminUserHandler = adminUsersPatchStack[adminUsersPatchStack.length - 1].handle;
+
+test("GET /admin/users/:id returns 200 with user profile", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (_sql, values) => {
+    assert.equal(values[0], 11);
+    return {
+      rowCount: 1,
+      rows: [
+        {
+          id: 11,
+          firebase_uid: "uid-11",
+          email: "reporter11@example.com",
+          full_name: "Reporter Eleven",
+          phone_number: "+639171234567",
+          role: "student",
+          profile_image_url: null,
+          status: "active"
+        }
+      ]
+    };
+  };
+
+  const req = { params: { id: "11" } };
+  const res = createRes();
+
+  await getAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, {
+    id: 11,
+    firebase_uid: "uid-11",
+    email: "reporter11@example.com",
+    full_name: "Reporter Eleven",
+    phone_number: "+639171234567",
+    role: "student",
+    profile_image_url: null,
+    status: "active"
+  });
+});
+
+test("GET /admin/users/:id returns 422 for invalid id", async () => {
+  const req = { params: { id: "0" } };
+  const res = createRes();
+
+  await getAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 422);
+  assert.deepEqual(res.body, {
+    message: "Validation failed",
+    errors: { id: ["Must be a positive integer"] }
+  });
+});
+
+test("GET /admin/users/:id returns 404 when user is missing", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async () => ({ rowCount: 0, rows: [] });
+
+  const req = { params: { id: "9999" } };
+  const res = createRes();
+
+  await getAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(res.body, { message: "User not found" });
+});
+
+test("GET /admin/users/:id middleware returns 401 when token is missing", async () => {
+  const req = { headers: {} };
+  const res = createRes();
+  let nextCalled = false;
+
+  await getAdminUserAuthMiddleware(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(nextCalled, false);
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(res.body, { message: "Missing Bearer token" });
+});
+
+test("GET /admin/users/:id middleware returns 403 without manage_users", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [{ permissions: ["manage_admins"] }]
+  });
+
+  const req = {
+    admin: { adminId: 123 }
+  };
+  const res = createRes();
+  let nextCalled = false;
+
+  await getAdminUserPermissionMiddleware(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(nextCalled, false);
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, { message: "Insufficient permissions" });
+});
 
 test("PATCH /admin/users/:id returns 200 for full_name update", async (t) => {
   const originalQuery = pool.query;

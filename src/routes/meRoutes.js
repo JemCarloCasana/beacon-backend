@@ -8,6 +8,7 @@ const router = express.Router();
 const PHONE_REGEX = /^(?:\+63|0)\d{10}$/;
 const PATCH_PHONE_REGEX = /^\+?\d{10,20}$/;
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const APP_USER_ROLES = new Set(["citizen", "student"]);
 const USER_SELECT_FIELDS = `
   id,
   firebase_uid,
@@ -108,6 +109,13 @@ function validateOptionalProfileImageUrl(profileImageUrl) {
   return normalized;
 }
 
+function normalizeAppUserRole(role) {
+  if (typeof role !== "string") return null;
+  const normalized = role.trim().toLowerCase();
+  if (!APP_USER_ROLES.has(normalized)) return null;
+  return normalized;
+}
+
 /**
  * POST /me/bootstrap
  * Ensures a Postgres profile exists for the current Firebase user.
@@ -119,7 +127,7 @@ router.post("/me/bootstrap", requireAppAuth, async (req, res) => {
   const client = await pool.connect();
   try {
     const { uid, email } = req.auth;
-    const { full_name, phone_number } = req.body;
+    const { full_name, phone_number, role } = req.body;
 
     // Validation (name)
     if (!full_name || typeof full_name !== "string" || !/^[A-Za-z ]{2,50}$/.test(full_name.trim())) {
@@ -134,6 +142,11 @@ router.post("/me/bootstrap", requireAppAuth, async (req, res) => {
         return res.status(400).json({ message: "Invalid phone_number" });
       }
       normalizedPhone = normalizePH(raw);
+    }
+
+    const normalizedRole = normalizeAppUserRole(role);
+    if (!normalizedRole) {
+      return res.status(400).json({ message: "Invalid role" });
     }
 
     await client.query("BEGIN");
@@ -155,17 +168,18 @@ router.post("/me/bootstrap", requireAppAuth, async (req, res) => {
 
     // Upsert by firebase_uid, but keep beacon_code stable once set
     const result = await client.query(
-      `INSERT INTO users (firebase_uid, email, full_name, phone_number, beacon_code)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO users (firebase_uid, email, full_name, phone_number, role, beacon_code)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (firebase_uid)
        DO UPDATE SET
          email = EXCLUDED.email,
          full_name = EXCLUDED.full_name,
          phone_number = EXCLUDED.phone_number,
+         role = EXCLUDED.role,
          beacon_code = COALESCE(users.beacon_code, EXCLUDED.beacon_code),
          updated_at = NOW()
        RETURNING ${USER_SELECT_FIELDS}`,
-      [uid, email, full_name.trim(), normalizedPhone, beaconCode]
+      [uid, email, full_name.trim(), normalizedPhone, normalizedRole, beaconCode]
     );
 
     await client.query("COMMIT");

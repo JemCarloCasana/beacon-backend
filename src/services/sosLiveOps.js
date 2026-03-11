@@ -1,8 +1,8 @@
 ﻿import { pool } from "../db.js";
 
-const VALID_STATUSES = new Set(["active", "resolved", "acknowledged"]);
+const VALID_STATUSES = new Set(["active", "resolved", "acknowledged", "cancelled", "safe"]);
 const VALID_EVENT_TYPES = new Set(["report_created", "status_update", "admin_acknowledged", "note"]);
-const VALID_LIVE_FILTERS = new Set(["open", "active", "resolved"]);
+const VALID_LIVE_FILTERS = new Set(["open", "active", "resolved", "cancelled", "safe"]);
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const REPLAY_WINDOW_MS = 5 * 60 * 1000;
@@ -53,6 +53,9 @@ function normalizeLimit(limit) {
 function statusWhereClause(status) {
   if (status === "open") {
     return "t.latest_status = 'active'";
+  }
+  if (status === "cancelled" || status === "safe") {
+    return "t.latest_status = 'resolved' AND t.terminal_status = $STATUS$";
   }
   return "t.latest_status = $STATUS$";
 }
@@ -156,6 +159,8 @@ export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, 
         st.assigned_unit,
         st.acknowledged_by_admin_id,
         st.resolved_at,
+        st.terminal_status,
+        st.resolved_source,
         root.created_at AS opened_at,
         le.message AS latest_message,
         le.latitude AS latest_latitude,
@@ -230,6 +235,8 @@ export async function getThreadStateAnyStatus(sosId) {
       st.assigned_unit,
       st.acknowledged_by_admin_id,
       st.resolved_at,
+      st.terminal_status,
+      st.resolved_source,
       root.created_at AS opened_at,
       le.message AS latest_message,
       le.latitude AS latest_latitude,
@@ -266,23 +273,31 @@ export async function listThreadEvents(sosId) {
   const result = await pool.query(
     `
     SELECT
-      id,
-      thread_id,
-      sos_id,
-      user_id,
-      status,
-      latitude,
-      longitude,
-      address,
-      message,
-      created_at,
-      actor_type,
-      actor_admin_id,
-      event_type,
-      emergency_category
-    FROM sos_events
-    WHERE sos_id = $1
-    ORDER BY created_at ASC, id ASC
+      se.id,
+      se.thread_id,
+      se.sos_id,
+      se.user_id,
+      CASE
+        WHEN se.status = 'resolved'
+          AND se.actor_type = 'user'
+          AND se.event_type = 'status_update'
+          AND st.terminal_status IS NOT NULL
+        THEN st.terminal_status
+        ELSE se.status
+      END AS status,
+      se.latitude,
+      se.longitude,
+      se.address,
+      se.message,
+      se.created_at,
+      se.actor_type,
+      se.actor_admin_id,
+      se.event_type,
+      se.emergency_category
+    FROM sos_events se
+    LEFT JOIN sos_threads st ON st.id = se.thread_id
+    WHERE se.sos_id = $1
+    ORDER BY se.created_at ASC, se.id ASC
     `,
     [sosId]
   );

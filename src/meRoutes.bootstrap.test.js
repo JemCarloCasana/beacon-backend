@@ -1,0 +1,262 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import router from "./routes/meRoutes.js";
+import { pool } from "./db.js";
+
+function findRouteHandler(path, method) {
+  const layer = router.stack.find(
+    (entry) => entry.route?.path === path && entry.route.methods?.[method]
+  );
+  if (!layer) {
+    throw new Error(`Route ${method.toUpperCase()} ${path} not found`);
+  }
+  return layer.route.stack[layer.route.stack.length - 1].handle;
+}
+
+function createRes() {
+  return {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    },
+  };
+}
+
+const bootstrapHandler = findRouteHandler("/me/bootstrap", "post");
+const getMeHandler = findRouteHandler("/me", "get");
+const getUsersHandler = findRouteHandler("/users", "get");
+
+function createBootstrapClient({
+  existingBeaconCode = null,
+  insertRoleRecorder = null,
+} = {}) {
+  return {
+    released: false,
+    async query(text, values = []) {
+      if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") {
+        return { rowCount: 0, rows: [] };
+      }
+      if (text.includes("SELECT id, beacon_code")) {
+        if (existingBeaconCode) {
+          return { rowCount: 1, rows: [{ id: 1, beacon_code: existingBeaconCode }] };
+        }
+        return { rowCount: 0, rows: [] };
+      }
+      if (text.includes("SELECT 1 FROM users WHERE beacon_code = $1")) {
+        return { rowCount: 0, rows: [] };
+      }
+      if (text.includes("INSERT INTO users")) {
+        if (insertRoleRecorder) {
+          insertRoleRecorder(values[4]);
+        }
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              id: 77,
+              firebase_uid: values[0],
+              email: values[1],
+              full_name: values[2],
+              phone_number: values[3],
+              role: values[4],
+              profile_image_url: null,
+              beacon_code: values[5],
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    },
+    release() {
+      this.released = true;
+    },
+  };
+}
+
+test("POST /me/bootstrap accepts citizen and normalizes mixed-case role", async (t) => {
+  const originalConnect = pool.connect;
+  let receivedRole = null;
+  const client = createBootstrapClient({
+    insertRoleRecorder: (role) => {
+      receivedRole = role;
+    },
+  });
+  pool.connect = async () => client;
+  t.after(() => {
+    pool.connect = originalConnect;
+  });
+
+  const req = {
+    auth: { uid: "uid-citizen", email: "citizen@example.com" },
+    body: { full_name: "Citizen User", phone_number: "09123456789", role: "CiTiZen" },
+  };
+  const res = createRes();
+
+  await bootstrapHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(receivedRole, "citizen");
+  assert.equal(res.body.role, "citizen");
+  assert.equal(client.released, true);
+});
+
+test("POST /me/bootstrap accepts student role", async (t) => {
+  const originalConnect = pool.connect;
+  const client = createBootstrapClient();
+  pool.connect = async () => client;
+  t.after(() => {
+    pool.connect = originalConnect;
+  });
+
+  const req = {
+    auth: { uid: "uid-student", email: "student@example.com" },
+    body: { full_name: "Student User", role: "student" },
+  };
+  const res = createRes();
+
+  await bootstrapHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.role, "student");
+  assert.equal(client.released, true);
+});
+
+test("POST /me/bootstrap rejects missing role", async (t) => {
+  const originalConnect = pool.connect;
+  const client = createBootstrapClient();
+  pool.connect = async () => client;
+  t.after(() => {
+    pool.connect = originalConnect;
+  });
+
+  const req = {
+    auth: { uid: "uid-missing-role", email: "missing-role@example.com" },
+    body: { full_name: "Missing Role" },
+  };
+  const res = createRes();
+
+  await bootstrapHandler(req, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.body, { message: "Invalid role" });
+  assert.equal(client.released, true);
+});
+
+test("POST /me/bootstrap rejects unknown role", async (t) => {
+  const originalConnect = pool.connect;
+  const client = createBootstrapClient();
+  pool.connect = async () => client;
+  t.after(() => {
+    pool.connect = originalConnect;
+  });
+
+  const req = {
+    auth: { uid: "uid-unknown-role", email: "unknown-role@example.com" },
+    body: { full_name: "Unknown Role", role: "teacher" },
+  };
+  const res = createRes();
+
+  await bootstrapHandler(req, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.body, { message: "Invalid role" });
+  assert.equal(client.released, true);
+});
+
+test("POST /me/bootstrap updates role to latest submitted value on re-bootstrap", async (t) => {
+  const originalConnect = pool.connect;
+  const insertedRoles = [];
+  pool.connect = async () =>
+    createBootstrapClient({
+      existingBeaconCode: "BCN-ABC123",
+      insertRoleRecorder: (role) => insertedRoles.push(role),
+    });
+  t.after(() => {
+    pool.connect = originalConnect;
+  });
+
+  const firstRes = createRes();
+  await bootstrapHandler(
+    {
+      auth: { uid: "uid-rebootstrap", email: "rebootstrap@example.com" },
+      body: { full_name: "Rebootstrap User", role: "citizen" },
+    },
+    firstRes
+  );
+  assert.equal(firstRes.statusCode, 200);
+  assert.equal(firstRes.body.role, "citizen");
+
+  const secondRes = createRes();
+  await bootstrapHandler(
+    {
+      auth: { uid: "uid-rebootstrap", email: "rebootstrap@example.com" },
+      body: { full_name: "Rebootstrap User", role: "STUDENT" },
+    },
+    secondRes
+  );
+  assert.equal(secondRes.statusCode, 200);
+  assert.equal(secondRes.body.role, "student");
+  assert.deepEqual(insertedRoles, ["citizen", "student"]);
+});
+
+test("GET /me and GET /users return normalized app role values", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (text, values) => {
+    if (text.includes("FROM users") && values[0] === "legacy-uid") {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 11,
+            firebase_uid: "legacy-uid",
+            email: "legacy@example.com",
+            full_name: "Legacy User",
+            phone_number: null,
+            role: "citizen",
+            profile_image_url: null,
+          },
+        ],
+      };
+    }
+    if (text.includes("FROM users") && values[0] === "new-uid") {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 22,
+            firebase_uid: "new-uid",
+            email: "new@example.com",
+            full_name: "New User",
+            phone_number: null,
+            role: "student",
+            profile_image_url: null,
+          },
+        ],
+      };
+    }
+    throw new Error("Unexpected query");
+  };
+
+  const meRes = createRes();
+  await getMeHandler({ auth: { uid: "legacy-uid" } }, meRes);
+  assert.equal(meRes.statusCode, 200);
+  assert.equal(meRes.body.role, "citizen");
+
+  const usersRes = createRes();
+  await getUsersHandler({ auth: { uid: "new-uid" } }, usersRes);
+  assert.equal(usersRes.statusCode, 200);
+  assert.equal(usersRes.body.role, "student");
+});

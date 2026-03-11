@@ -74,6 +74,47 @@ test("GET /admin/sos/live rejects legacy acknowledged status filter", async () =
   assert.deepEqual(res.body, { message: "Invalid status filter" });
 });
 
+test("GET /admin/sos/live accepts cancelled status filter", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  let capturedParams = null;
+  pool.query = async (_sql, params) => {
+    capturedParams = params;
+    return {
+      rowCount: 1,
+      rows: [
+        {
+          thread_id: 55,
+          sos_id: 5,
+          latest_status: "resolved",
+          terminal_status: "cancelled",
+          resolved_source: "android",
+          acknowledged_at: null,
+          acknowledged_by_admin_id: null,
+          assigned_unit: null,
+          latest_event_at: "2026-03-11T10:00:00.000Z",
+          requires_attention: false
+        }
+      ]
+    };
+  };
+
+  const stack = getRoute("/admin/sos/live", "get");
+  const handler = stack[stack.length - 1].handle;
+  const req = { query: { status: "cancelled", limit: "100" } };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(capturedParams[0], "cancelled");
+  assert.equal(res.body[0].terminal_status, "cancelled");
+  assert.equal(res.body[0].resolved_source, "android");
+});
+
 test("GET /admin/sos/:sosId returns 400 on invalid sos id", async () => {
   const stack = getRoute("/admin/sos/:sosId", "get");
   const handler = stack[stack.length - 1].handle;
@@ -360,6 +401,8 @@ test("GET /admin/sos/live includes snake_case and camelCase ack/unit aliases", a
         acknowledged_at: "2026-03-07T10:00:00.000Z",
         acknowledged_by_admin_id: 11,
         assigned_unit: "Emergency Medical Unit",
+        terminal_status: null,
+        resolved_source: null,
         latest_event_at: "2026-03-07T10:00:00.000Z",
         requires_attention: false
       }
@@ -398,6 +441,8 @@ test("GET /admin/sos/:sosId includes snake_case and camelCase ack/unit aliases i
             acknowledged_at: "2026-03-07T10:00:00.000Z",
             acknowledged_by_admin_id: 11,
             assigned_unit: "Emergency Medical Unit",
+            terminal_status: null,
+            resolved_source: null,
             latest_event_at: "2026-03-07T10:00:00.000Z",
             requires_attention: false
           }
@@ -422,6 +467,70 @@ test("GET /admin/sos/:sosId includes snake_case and camelCase ack/unit aliases i
   assert.equal(res.body.thread.assignedUnit, "Emergency Medical Unit");
   assert.equal(res.body.thread.acknowledged_at, "2026-03-07T10:00:00.000Z");
   assert.equal(res.body.thread.acknowledgedAt, "2026-03-07T10:00:00.000Z");
+});
+
+test("GET /admin/sos/:sosId timeline exposes cancelled terminal status", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (sql) => {
+    const text = String(sql);
+    if (/FROM sos_threads st/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            thread_id: 55,
+            sos_id: 5,
+            latest_status: "resolved",
+            terminal_status: "cancelled",
+            resolved_source: "android",
+            acknowledged_at: null,
+            acknowledged_by_admin_id: null,
+            assigned_unit: null,
+            latest_event_at: "2026-03-07T10:00:00.000Z",
+            requires_attention: false
+          }
+        ]
+      };
+    }
+    if (/FROM sos_events se/i.test(text) && /LEFT JOIN sos_threads st ON st.id = se.thread_id/i.test(text)) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 901,
+            thread_id: 55,
+            sos_id: 5,
+            user_id: 42,
+            status: "cancelled",
+            latitude: 16.0431,
+            longitude: 120.3333,
+            address: "Dagupan City",
+            message: null,
+            created_at: "2026-03-07T10:00:00.000Z",
+            actor_type: "user",
+            actor_admin_id: null,
+            event_type: "status_update",
+            emergency_category: "medical"
+          }
+        ]
+      };
+    }
+    throw new Error(`Unexpected query in test: ${text}`);
+  };
+
+  const stack = getRoute("/admin/sos/:sosId", "get");
+  const handler = stack[stack.length - 1].handle;
+  const req = { params: { sosId: "5" } };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.events[0].status, "cancelled");
 });
 
 test("GET /admin/sos/live-map returns map rows", async (t) => {

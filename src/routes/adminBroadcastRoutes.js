@@ -48,16 +48,26 @@ router.post(
         WHERE ($2 = 'all')
            OR (
              $2 = 'role'
-             AND EXISTS (
-               SELECT 1
-               FROM unnest(COALESCE($3::int[], ARRAY[]::int[])) AS rid(role_id)
-               JOIN roles r ON r.id = rid.role_id
-               WHERE lower(r.name) = lower(u.role)
+             AND (
+               EXISTS (
+                 SELECT 1
+                 FROM unnest(COALESCE($3::text[], ARRAY[]::text[])) AS ar(role_name)
+                 WHERE lower(ar.role_name) = lower(u.role)
+               )
+               OR (
+                 COALESCE(array_length($3::text[], 1), 0) = 0
+                 AND EXISTS (
+                   SELECT 1
+                   FROM unnest(COALESCE($4::int[], ARRAY[]::int[])) AS rid(role_id)
+                   JOIN roles r ON r.id = rid.role_id
+                   WHERE lower(r.name) = lower(u.role)
+                 )
+               )
              )
            )
         ON CONFLICT DO NOTHING
         `,
-        [broadcastId, b.audience_type, b.audience_role_ids || []]
+        [broadcastId, b.audience_type, b.audience_roles || [], b.audience_role_ids || []]
       );
 
       await client.query("COMMIT");

@@ -280,6 +280,47 @@ router.get(
 );
 
 /**
+ * GET /admin/users/:id
+ * Admin-only user profile lookup by id.
+ */
+router.get(
+  "/admin/users/:id",
+  requireAuth,
+  requirePermission("manage_users"),
+  async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return res.status(422).json(
+          buildValidationError({
+            id: ["Must be a positive integer"],
+          })
+        );
+      }
+
+      const result = await pool.query(
+        `
+        SELECT ${ADMIN_USER_RETURN_FIELDS}
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [userId]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      return res.json(result.rows[0]);
+    } catch (err) {
+      console.error("GET /admin/users/:id error:", err);
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+/**
  * PATCH /admin/users/:id
  * Admin-only partial update for mobile users.
  */

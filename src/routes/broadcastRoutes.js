@@ -8,6 +8,7 @@ const router = express.Router();
 
 const ALLOWED_SEVERITIES = ["info", "medium", "high", "critical"];
 const ALLOWED_AUDIENCE_TYPES = ["all", "role"];
+const ALLOWED_APP_AUDIENCE_ROLES = new Set(["citizen", "student"]);
 
 function parsePositiveInt(value) {
   const num = Number(value);
@@ -32,6 +33,31 @@ function normalizeRoleIds(audienceRoleIds) {
   }
 
   return [...new Set(normalized)];
+}
+
+function normalizeAudienceRoles(audienceRoles) {
+  if (!Array.isArray(audienceRoles) || audienceRoles.length === 0) {
+    return null;
+  }
+
+  const normalized = [];
+  for (const role of audienceRoles) {
+    if (typeof role !== "string") {
+      return null;
+    }
+
+    const candidate = role.trim().toLowerCase();
+    if (!ALLOWED_APP_AUDIENCE_ROLES.has(candidate)) {
+      return null;
+    }
+    normalized.push(candidate);
+  }
+
+  return [...new Set(normalized)];
+}
+
+function hasOwnProperty(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj ?? {}, key);
 }
 
 async function resolveAuthenticatedInboxUserId(req, res) {
@@ -92,10 +118,28 @@ router.post(
       }
 
       let audienceRoleIds = null;
+      let audienceRoles = null;
       if (audienceType === "role") {
-        audienceRoleIds = normalizeRoleIds(req.body?.audience_role_ids);
-        if (!audienceRoleIds) {
-          return res.status(400).json({ message: "audience_role_ids must be a non-empty array of integers" });
+        if (hasOwnProperty(req.body, "audience_roles")) {
+          audienceRoles = normalizeAudienceRoles(req.body?.audience_roles);
+          if (!audienceRoles) {
+            return res.status(400).json({
+              message:
+                "audience_roles must be a non-empty array containing only citizen/student. audience_role_ids is deprecated fallback.",
+            });
+          }
+        } else if (hasOwnProperty(req.body, "audience_role_ids")) {
+          audienceRoleIds = normalizeRoleIds(req.body?.audience_role_ids);
+          if (!audienceRoleIds) {
+            return res.status(400).json({
+              message:
+                "audience_role_ids must be a non-empty array of integers (deprecated). Prefer audience_roles.",
+            });
+          }
+        } else {
+          return res.status(400).json({
+            message: "audience_roles is required when audience_type=role. audience_role_ids is deprecated fallback.",
+          });
         }
       }
 
@@ -106,14 +150,15 @@ router.post(
           body,
           severity,
           audience_type,
+          audience_roles,
           audience_role_ids,
           created_by_admin_id,
           sent_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, NULL)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
         RETURNING *
         `,
-        [title, body, severity, audienceType, audienceRoleIds, adminId]
+        [title, body, severity, audienceType, audienceRoles, audienceRoleIds, adminId]
       );
 
       return res.status(201).json(result.rows[0]);
@@ -177,16 +222,26 @@ router.post(
         WHERE ($2 = 'all')
            OR (
              $2 = 'role'
-             AND EXISTS (
-               SELECT 1
-               FROM unnest(COALESCE($3::int[], ARRAY[]::int[])) AS rid(role_id)
-               JOIN roles r ON r.id = rid.role_id
-               WHERE lower(r.name) = lower(u.role)
+             AND (
+               EXISTS (
+                 SELECT 1
+                 FROM unnest(COALESCE($3::text[], ARRAY[]::text[])) AS ar(role_name)
+                 WHERE lower(ar.role_name) = lower(u.role)
+               )
+               OR (
+                 COALESCE(array_length($3::text[], 1), 0) = 0
+                 AND EXISTS (
+                   SELECT 1
+                   FROM unnest(COALESCE($4::int[], ARRAY[]::int[])) AS rid(role_id)
+                   JOIN roles r ON r.id = rid.role_id
+                   WHERE lower(r.name) = lower(u.role)
+                 )
+               )
              )
            )
         ON CONFLICT DO NOTHING
         `,
-        [broadcastId, broadcast.audience_type, broadcast.audience_role_ids || []]
+        [broadcastId, broadcast.audience_type, broadcast.audience_roles || [], broadcast.audience_role_ids || []]
       );
 
       await client.query("COMMIT");
