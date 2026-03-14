@@ -370,9 +370,22 @@ router.patch("/sos/:sosId/status", requireAppAuth, async (req, res) => {
     }
 
     const latest = latestRes.rows[0];
-    if (Number(latest.user_id) !== userId) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ message: "Forbidden" });
+    const ownerUserId = Number(latest.user_id);
+    if (ownerUserId !== userId) {
+      const friendshipRes = await client.query(
+        `
+        SELECT 1
+        FROM friendships
+        WHERE (user_id = $1 AND friend_user_id = $2)
+           OR (user_id = $2 AND friend_user_id = $1)
+        LIMIT 1
+        `,
+        [ownerUserId, userId]
+      );
+      if (friendshipRes.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({ message: "Forbidden" });
+      }
     }
 
     if (latest.latest_status !== "active") {

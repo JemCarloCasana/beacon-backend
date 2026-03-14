@@ -122,35 +122,8 @@ test("PATCH /sos/:sosId/status persists terminal outcome and returns contract pa
     if (/SELECT id FROM users WHERE firebase_uid = \$1/i.test(text)) {
       return { rowCount: 1, rows: [{ id: 42 }] };
     }
-    if (/FROM sos_threads st/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            thread_id: 99,
-            sos_id: 7,
-            user_id: 42,
-            full_name: "User",
-            phone_number: null,
-            role: "citizen",
-            latest_status: "resolved",
-            emergency_category: "medical",
-            acknowledged_at: null,
-            assigned_unit: null,
-            acknowledged_by_admin_id: null,
-            resolved_at: "2026-03-11T00:30:00.000Z",
-            opened_at: "2026-03-11T00:00:00.000Z",
-            latest_message: null,
-            latest_latitude: 16.04,
-            latest_longitude: 120.33,
-            latest_address: "Dagupan",
-            latest_event_at: "2026-03-11T00:30:00.000Z",
-            admin_acknowledged_at: null,
-            admin_acknowledged_by_admin_id: null,
-            requires_attention: false
-          }
-        ]
-      };
+    if (/WHERE st\.root_event_id = \$1/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
+      return { rowCount: 0, rows: [] };
     }
     throw new Error(`Unexpected pool.query in test: ${text}`);
   };
@@ -218,4 +191,152 @@ test("PATCH /sos/:sosId/status persists terminal outcome and returns contract pa
     resolved_at: "2026-03-11T00:30:00.000Z"
   });
   assert.equal(client.insertParams[6], "safe");
+});
+
+test("PATCH /sos/:sosId/status allows an accepted friend to mark the SOS safe", async (t) => {
+  const originalQuery = pool.query;
+  const originalConnect = pool.connect;
+  t.after(() => {
+    pool.query = originalQuery;
+    pool.connect = originalConnect;
+  });
+
+  pool.query = async (sql) => {
+    const text = String(sql);
+    if (/SELECT id FROM users WHERE firebase_uid = \$1/i.test(text)) {
+      return { rowCount: 1, rows: [{ id: 77 }] };
+    }
+    if (/WHERE st\.root_event_id = \$1/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
+      return { rowCount: 0, rows: [] };
+    }
+    throw new Error(`Unexpected pool.query in test: ${text}`);
+  };
+
+  const client = {
+    insertParams: null,
+    async query(sql) {
+      const text = String(sql);
+      if (/^BEGIN$/i.test(text.trim())) return { rowCount: null, rows: [] };
+      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              thread_id: 99,
+              user_id: 42,
+              latest_status: "active",
+              resolved_at: null,
+              emergency_category: "medical",
+              latitude: 16.04,
+              longitude: 120.33,
+              address: "Dagupan"
+            }
+          ]
+        };
+      }
+      if (/FROM friendships/i.test(text)) {
+        return { rowCount: 1, rows: [{ "?column?": 1 }] };
+      }
+      if (/UPDATE sos_threads/i.test(text)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              sos_id: 7,
+              terminal_status: "safe",
+              resolved_at: "2026-03-11T00:30:00.000Z"
+            }
+          ]
+        };
+      }
+      if (/INSERT INTO sos_events/i.test(text)) {
+        this.insertParams = arguments[1];
+        return { rowCount: 1, rows: [] };
+      }
+      if (/^COMMIT$/i.test(text.trim())) return { rowCount: null, rows: [] };
+      throw new Error(`Unexpected client.query in test: ${text}`);
+    },
+    release() {}
+  };
+  pool.connect = async () => client;
+
+  const stack = getRoute("/sos/:sosId/status", "patch");
+  const handler = stack[stack.length - 1].handle;
+  const req = {
+    auth: { uid: "firebase-uid-2" },
+    params: { sosId: "7" },
+    body: { status: "safe", source: "android", resolved_at: "2026-03-11T00:30:00.000Z" }
+  };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(client.insertParams[2], 77);
+  assert.equal(client.insertParams[6], "safe");
+});
+
+test("PATCH /sos/:sosId/status returns 403 for a non-owner who is not a friend", async (t) => {
+  const originalQuery = pool.query;
+  const originalConnect = pool.connect;
+  t.after(() => {
+    pool.query = originalQuery;
+    pool.connect = originalConnect;
+  });
+
+  pool.query = async (sql) => {
+    const text = String(sql);
+    if (/SELECT id FROM users WHERE firebase_uid = \$1/i.test(text)) {
+      return { rowCount: 1, rows: [{ id: 77 }] };
+    }
+    if (/WHERE st\.root_event_id = \$1/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
+      return { rowCount: 0, rows: [] };
+    }
+    throw new Error(`Unexpected pool.query in test: ${text}`);
+  };
+
+  const client = {
+    async query(sql) {
+      const text = String(sql);
+      if (/^BEGIN$/i.test(text.trim())) return { rowCount: null, rows: [] };
+      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              thread_id: 99,
+              user_id: 42,
+              latest_status: "active",
+              resolved_at: null,
+              emergency_category: "medical",
+              latitude: 16.04,
+              longitude: 120.33,
+              address: "Dagupan"
+            }
+          ]
+        };
+      }
+      if (/FROM friendships/i.test(text)) {
+        return { rowCount: 0, rows: [] };
+      }
+      if (/^ROLLBACK$/i.test(text.trim())) return { rowCount: null, rows: [] };
+      throw new Error(`Unexpected client.query in test: ${text}`);
+    },
+    release() {}
+  };
+  pool.connect = async () => client;
+
+  const stack = getRoute("/sos/:sosId/status", "patch");
+  const handler = stack[stack.length - 1].handle;
+  const req = {
+    auth: { uid: "firebase-uid-2" },
+    params: { sosId: "7" },
+    body: { status: "safe" }
+  };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, { message: "Forbidden" });
 });
