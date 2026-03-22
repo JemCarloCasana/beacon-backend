@@ -40,10 +40,14 @@ function createRes() {
 
 const adminAdminsPatchStack = findRouteLayer("/admin/admins/:id", "patch");
 const adminAdminsGetStack = findRouteLayer("/admin/admins", "get");
+const adminAdminsPostStack = findRouteLayer("/admin/admins", "post");
 const adminAdminsDeleteStack = findRouteLayer("/admin/admins/:id", "delete");
 const adminNotificationsGetStack = findRouteLayer("/admin/notifications", "get");
 const adminNotificationsReadStack = findRouteLayer("/admin/notifications/:id/read", "patch");
 const adminRequestsPostStack = findRouteLayer("/admin/admin-requests", "post");
+const postAdminAdminAuthMiddleware = adminAdminsPostStack[0].handle;
+const postAdminAdminPermissionMiddleware = adminAdminsPostStack[1].handle;
+const postAdminAdminHandler = adminAdminsPostStack[adminAdminsPostStack.length - 1].handle;
 const patchAdminAdminPermissionMiddleware = adminAdminsPatchStack[1].handle;
 const patchAdminAdminHandler = adminAdminsPatchStack[adminAdminsPatchStack.length - 1].handle;
 const getAdminsHandler = adminAdminsGetStack[adminAdminsGetStack.length - 1].handle;
@@ -52,6 +56,242 @@ const getNotificationsHandler = adminNotificationsGetStack[adminNotificationsGet
 const patchNotificationReadHandler =
   adminNotificationsReadStack[adminNotificationsReadStack.length - 1].handle;
 const postAdminRequestHandler = adminRequestsPostStack[adminRequestsPostStack.length - 1].handle;
+
+test("POST /admin/admins returns 201 for personnel account creation", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  let callCount = 0;
+  pool.query = async (sql, values) => {
+    callCount += 1;
+    if (callCount === 1) {
+      assert.match(String(sql), /FROM roles/i);
+      assert.deepEqual(values, ["personnel"]);
+      return { rowCount: 1, rows: [{ id: 2 }] };
+    }
+
+    if (callCount === 2) {
+      assert.match(String(sql), /INSERT INTO admins/i);
+      assert.equal(values[0], "personnel@example.com");
+      assert.match(String(values[1]), /^\$2/);
+      assert.equal(values[2], "Personnel User");
+      assert.equal(values[3], 2);
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 14,
+            email: "personnel@example.com",
+            full_name: "Personnel User",
+            role_id: 2,
+            created_at: "2026-03-22T00:00:00.000Z",
+            status: "active",
+          },
+        ],
+      };
+    }
+
+    throw new Error(`Unexpected query call ${callCount}`);
+  };
+
+  const req = {
+    body: {
+      full_name: "Personnel User",
+      email: "Personnel@example.com",
+      password: "SecurePass1!",
+      role: "personnel",
+    },
+  };
+  const res = createRes();
+
+  await postAdminAdminHandler(req, res);
+
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(res.body, {
+    id: 14,
+    email: "personnel@example.com",
+    full_name: "Personnel User",
+    role_id: 2,
+    created_at: "2026-03-22T00:00:00.000Z",
+    status: "active",
+    role: "personnel",
+  });
+});
+
+test("POST /admin/admins returns 201 for admin account creation", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  let callCount = 0;
+  pool.query = async (_sql, values) => {
+    callCount += 1;
+    if (callCount === 1) {
+      assert.deepEqual(values, ["admin"]);
+      return { rowCount: 1, rows: [{ id: 1 }] };
+    }
+
+    if (callCount === 2) {
+      assert.equal(values[0], "admin.user@example.com");
+      assert.equal(values[2], "Admin User");
+      assert.equal(values[3], 1);
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 15,
+            email: "admin.user@example.com",
+            full_name: "Admin User",
+            role_id: 1,
+            created_at: "2026-03-22T01:00:00.000Z",
+            status: "active",
+          },
+        ],
+      };
+    }
+
+    throw new Error(`Unexpected query call ${callCount}`);
+  };
+
+  const req = {
+    body: {
+      full_name: "Admin User",
+      email: "ADMIN.USER@example.com",
+      password: "SecurePass1!",
+      role: "admin",
+    },
+  };
+  const res = createRes();
+
+  await postAdminAdminHandler(req, res);
+
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.role, "admin");
+  assert.equal(res.body.role_id, 1);
+});
+
+test("POST /admin/admins returns 422 for invalid payload", async () => {
+  const req = {
+    body: {
+      full_name: "A",
+      email: "invalid-email",
+      password: "weak",
+      role: "citizen",
+    },
+  };
+  const res = createRes();
+
+  await postAdminAdminHandler(req, res);
+
+  assert.equal(res.statusCode, 422);
+  assert.deepEqual(res.body, {
+    message: "Validation failed",
+    errors: {
+      email: "Invalid email format",
+      full_name: "Full name must be between 2 and 100 characters",
+      password: "Password must be at least 10 characters",
+      role: 'Role must be "admin" or "personnel"',
+    },
+  });
+});
+
+test("POST /admin/admins returns 500 when role configuration is missing", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async () => ({ rowCount: 0, rows: [] });
+
+  const req = {
+    body: {
+      full_name: "Role Missing",
+      email: "missing@example.com",
+      password: "SecurePass1!",
+      role: "personnel",
+    },
+  };
+  const res = createRes();
+
+  await postAdminAdminHandler(req, res);
+
+  assert.equal(res.statusCode, 500);
+  assert.deepEqual(res.body, { message: "Role configuration missing in DB" });
+});
+
+test("POST /admin/admins returns 409 on duplicate email", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  let callCount = 0;
+  pool.query = async () => {
+    callCount += 1;
+    if (callCount === 1) {
+      return { rowCount: 1, rows: [{ id: 2 }] };
+    }
+    const err = new Error("duplicate key");
+    err.code = "23505";
+    throw err;
+  };
+
+  const req = {
+    body: {
+      full_name: "Existing User",
+      email: "existing@example.com",
+      password: "SecurePass1!",
+      role: "personnel",
+    },
+  };
+  const res = createRes();
+
+  await postAdminAdminHandler(req, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body, { message: "Email already exists" });
+});
+
+test("POST /admin/admins middleware returns 401 when token is missing", async () => {
+  const req = { headers: {} };
+  const res = createRes();
+  let nextCalled = false;
+
+  await postAdminAdminAuthMiddleware(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(nextCalled, false);
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(res.body, { message: "Missing Bearer token" });
+});
+
+test("POST /admin/admins middleware returns 403 without manage_admins", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [{ permissions: ["manage_users"] }],
+  });
+
+  const req = { admin: { adminId: 123 } };
+  const res = createRes();
+  let nextCalled = false;
+
+  await postAdminAdminPermissionMiddleware(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(nextCalled, false);
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, { message: "Insufficient permissions" });
+});
 
 test("PATCH /admin/admins/:id returns 200", async (t) => {
   const originalQuery = pool.query;

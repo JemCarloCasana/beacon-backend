@@ -1,5 +1,7 @@
 import express from "express";
+import bcrypt from "bcrypt";
 import { getAdminPermissions } from "../middleware/adminAuth.js";
+import { buildValidationError, validateAdminCreatePayload } from "../utils/adminAuthValidation.js";
 import { pool } from "../db.js";
 import { requireAuth, requirePermission } from "../middleware/adminAuth.js"; // ✅ FIXED
 
@@ -124,15 +126,25 @@ function normalizeNotificationRow(row) {
   };
 }
 
-function buildValidationError(errors) {
-  return { message: "Validation failed", errors };
-}
-
 function addFieldError(errors, field, message) {
   if (!errors[field]) {
     errors[field] = [];
   }
   errors[field].push(message);
+}
+
+async function getRoleIdByName(roleName) {
+  const result = await pool.query(
+    `
+    SELECT id
+    FROM roles
+    WHERE lower(name) = $1
+    LIMIT 1
+    `,
+    [String(roleName).trim().toLowerCase()]
+  );
+
+  return result.rowCount > 0 ? result.rows[0].id : null;
 }
 
 function validateAdminUserPatchPayload(body) {
@@ -274,6 +286,50 @@ router.get(
       return res.json(result.rows);
     } catch (err) {
       console.error("GET /admin/admins error:", err); // ✅ IMPORTANT
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+);
+
+/**
+ * POST /admin/admins
+ * Admin-only account creation for admin/personnel accounts.
+ */
+router.post(
+  "/admin/admins",
+  requireAuth,
+  requirePermission("manage_admins"),
+  async (req, res) => {
+    try {
+      const { errors, normalized } = validateAdminCreatePayload(req.body);
+      if (Object.keys(errors).length > 0) {
+        return res.status(422).json(buildValidationError(errors));
+      }
+
+      const roleId = await getRoleIdByName(normalized.role);
+      if (!roleId) {
+        return res.status(500).json({ message: "Role configuration missing in DB" });
+      }
+
+      const passwordHash = await bcrypt.hash(normalized.password, 12);
+      const result = await pool.query(
+        `
+        INSERT INTO admins (email, password_hash, full_name, role_id)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, email, full_name, role_id, created_at, status
+        `,
+        [normalized.email, passwordHash, normalized.full_name, roleId]
+      );
+
+      return res.status(201).json({
+        ...result.rows[0],
+        role: normalized.role,
+      });
+    } catch (err) {
+      if (err?.code === "23505") {
+        return res.status(409).json({ message: "Email already exists" });
+      }
+      console.error("POST /admin/admins error:", err);
       return res.status(500).json({ message: "Server error" });
     }
   }

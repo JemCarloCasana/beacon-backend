@@ -502,6 +502,29 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /admin/admins:
+    post:
+      summary: Create admin/personnel account
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminCreateAdminRequest"
+      responses:
+        "201":
+          description: Admin created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAccountDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
     get:
       summary: List admin/personnel accounts
       security:
@@ -1235,12 +1258,34 @@ components:
           type: string
         role_id:
           type: integer
+        role:
+          type: string
+          enum: [admin, personnel]
         created_at:
           type: string
           format: date-time
         status:
           type: string
           enum: [active, deactivated]
+
+    AdminCreateAdminRequest:
+      type: object
+      required: [full_name, email, password, role]
+      additionalProperties: false
+      properties:
+        full_name:
+          type: string
+          minLength: 2
+          maxLength: 100
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 10
+        role:
+          type: string
+          enum: [admin, personnel]
 
     PatchMeRequest:
       type: object

@@ -22,6 +22,7 @@ This backend uses two auth systems:
   - `POST /admin/broadcasts/:id/ack`
 - Admin JWT + permission-protected routes:
   - `GET /admin/me`
+  - `POST /admin/admins`
   - `GET /admin/users/:id`
   - `PATCH /admin/users/:id`
   - `PATCH /admin/admins/:id`
