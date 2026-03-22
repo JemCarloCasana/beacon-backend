@@ -41,7 +41,7 @@ test("POST /admin/broadcasts accepts audience_roles and normalizes deduped value
     assert.deepEqual(params, [
       "Campus Alert",
       "Classes suspended",
-      "high",
+      "danger",
       "role",
       ["citizen", "student"],
       null,
@@ -60,7 +60,7 @@ test("POST /admin/broadcasts accepts audience_roles and normalizes deduped value
     body: {
       title: "Campus Alert",
       body: "Classes suspended",
-      severity: "HIGH",
+      severity: "Danger",
       audience_type: "role",
       audience_roles: [" Citizen ", "student", "CITIZEN"],
       audience_role_ids: [100, 101],
@@ -85,7 +85,7 @@ test("POST /admin/broadcasts accepts deprecated audience_role_ids fallback", asy
     assert.deepEqual(params, [
       "Legacy Alert",
       "Legacy payload",
-      "medium",
+      "warning",
       "role",
       null,
       [1, 2],
@@ -104,7 +104,7 @@ test("POST /admin/broadcasts accepts deprecated audience_role_ids fallback", asy
     body: {
       title: "Legacy Alert",
       body: "Legacy payload",
-      severity: "medium",
+      severity: "Warning",
       audience_type: "role",
       audience_role_ids: [1, 1, 2],
     },
@@ -125,7 +125,7 @@ test("POST /admin/broadcasts rejects role audience when no selector is provided"
     body: {
       title: "Missing selector",
       body: "Body",
-      severity: "info",
+      severity: "Announcement",
       audience_type: "role",
     },
   };
@@ -135,6 +135,26 @@ test("POST /admin/broadcasts rejects role audience when no selector is provided"
 
   assert.equal(res.statusCode, 400);
   assert.match(res.body?.message ?? "", /audience_roles is required/i);
+});
+
+test("POST /admin/broadcasts rejects legacy severity values", async () => {
+  const stack = getRoute(broadcastRouter, "/admin/broadcasts", "post");
+  const handler = stack[stack.length - 1].handle;
+  const req = {
+    admin: { adminId: 5 },
+    body: {
+      title: "Old severity",
+      body: "Body",
+      severity: "high",
+      audience_type: "all",
+    },
+  };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.body, { message: "Invalid severity" });
 });
 
 test("POST /admin/broadcasts/:id/send uses audience_roles first with legacy fallback parameter still available", async (t) => {
@@ -162,7 +182,7 @@ test("POST /admin/broadcasts/:id/send uses audience_roles first with legacy fall
               id: 7,
               title: "Title",
               body: "Body",
-              severity: "high",
+              severity: "danger",
               audience_type: "role",
               audience_roles: ["citizen"],
               audience_role_ids: [3],
@@ -225,7 +245,7 @@ test("POST /admin/broadcasts/:id/publish uses audience_roles first with legacy f
               id: 8,
               title: "Title",
               body: "Body",
-              severity: "high",
+              severity: "announcement",
               audience_type: "role",
               audience_roles: ["student"],
               audience_role_ids: [4],

@@ -12,7 +12,7 @@
     "dev": "node --watch server.js",
     "start": "node server.js",
     "start:prod": "NODE_ENV=production node server.js",
-    "test": "node src/adminAuthRoutes.contract.test.js && node src/meRoutes.patch.test.js && node src/meRoutes.bootstrap.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js && node src/broadcastRoutes.auth.test.js && node src/broadcastRoutes.create.test.js && node src/requireAuth.middleware.test.js && node src/adminSosRoutes.liveops.test.js && node src/incidentRoutes.admin.test.js && node src/sosRoutes.test.js && node src/adminReportsRoutes.test.js"
+    "test": "node src/adminAuthRoutes.contract.test.js && node src/meRoutes.patch.test.js && node src/meRoutes.bootstrap.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js && node src/broadcastRoutes.auth.test.js && node src/broadcastRoutes.create.test.js && node src/requireAuth.middleware.test.js && node src/friendRoutes.test.js && node src/adminSosRoutes.liveops.test.js && node src/incidentRoutes.admin.test.js && node src/sosRoutes.test.js && node src/adminReportsRoutes.test.js && node src/userNotifications.test.js"
   },
   "keywords": [
     "beacon",
@@ -27,7 +27,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
-    "firebase-admin": "^13.6.1",
+    "firebase-admin": "^13.7.0",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
     "pg": "^8.18.0"

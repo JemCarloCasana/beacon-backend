@@ -97,6 +97,35 @@ paths:
               schema:
                 $ref: "#/components/schemas/UserDto"
 
+  /users/search:
+    get:
+      summary: Search app users for friend discovery
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Case-insensitive full-name search query. Minimum length is 2 characters.
+          schema:
+            type: string
+            minLength: 2
+      responses:
+        "200":
+          description: Up to 20 matching public user records with current relationship state
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserSearchResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /users/{id}/public:
     get:
       summary: Public user profile
@@ -130,6 +159,44 @@ paths:
           description: Registered
         "400":
           $ref: "#/components/responses/BadRequest"
+
+  /notifications:
+    get:
+      summary: List current authenticated user's notifications
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Notification list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserNotificationDto"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /notifications/{id}/read:
+    patch:
+      summary: Mark current user's notification as read
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Marked read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserNotificationReadResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /contacts:
     get:
@@ -183,9 +250,62 @@ paths:
       summary: Send friend request via beacon code
       security:
         - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FriendRequestByBeaconCodeRequest"
       responses:
         "201":
           description: Request created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FriendRequestDto"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Request already pending or users are already friends
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /friends/request/by-user:
+    post:
+      summary: Send friend request via user id
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FriendRequestByUserRequest"
+      responses:
+        "201":
+          description: Request created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FriendRequestDto"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Request already pending or users are already friends
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /friends/requests/incoming:
     get:
@@ -839,8 +959,8 @@ paths:
                 report_key:
                   type: string
                   enum:
-                    - daily_incident_summary
-                    - weekly_response_analysis
+                    - daily_safety_report
+                    - weekly_safety_report
                     - monthly_safety_report
                 timezone:
                   type: string
@@ -1053,6 +1173,56 @@ components:
           type: string
           enum: [active, deactivated]
 
+    FriendshipStatus:
+      type: string
+      enum: [none, already_friends, incoming_pending, outgoing_pending]
+
+    UserSearchResult:
+      type: object
+      required: [id, full_name, friendship_status]
+      properties:
+        id:
+          type: integer
+        full_name:
+          type: string
+        beacon_code:
+          type: string
+          nullable: true
+        friendship_status:
+          $ref: "#/components/schemas/FriendshipStatus"
+
+    FriendRequestByBeaconCodeRequest:
+      type: object
+      required: [beacon_code]
+      properties:
+        beacon_code:
+          type: string
+
+    FriendRequestByUserRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: integer
+          minimum: 1
+
+    FriendRequestDto:
+      type: object
+      required: [id, requester_user_id, addressee_user_id, status, created_at]
+      properties:
+        id:
+          type: integer
+        requester_user_id:
+          type: integer
+        addressee_user_id:
+          type: integer
+        status:
+          type: string
+          enum: [pending, accepted, rejected, cancelled]
+        created_at:
+          type: string
+          format: date-time
+
     AdminAccountDto:
       type: object
       properties:
@@ -1085,10 +1255,72 @@ components:
         phone_number:
           type: string
           pattern: "^\\+?\\d{10,20}$"
+        role:
+          type: string
+          enum: [citizen, student]
         profile_image_url:
           type: string
           format: uri
           nullable: true
+
+    UserNotificationType:
+      type: string
+      enum: [incident_update, sos_update]
+
+    UserNotificationMetadata:
+      type: object
+      properties:
+        incident_id:
+          type: integer
+          nullable: true
+        sos_id:
+          type: integer
+          nullable: true
+        status:
+          type: string
+          nullable: true
+        assigned_unit:
+          type: string
+          nullable: true
+        assigned_department:
+          type: string
+          nullable: true
+        fallback_route:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    UserNotificationDto:
+      type: object
+      properties:
+        id:
+          type: integer
+        recipient_user_id:
+          type: integer
+        type:
+          $ref: "#/components/schemas/UserNotificationType"
+        title:
+          type: string
+        message:
+          type: string
+        metadata:
+          $ref: "#/components/schemas/UserNotificationMetadata"
+        is_read:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    UserNotificationReadResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        notification:
+          $ref: "#/components/schemas/UserNotificationDto"
 
     AdminPatchUserRequest:
       type: object

@@ -216,9 +216,12 @@ router.post("/sos", requireAppAuth, async (req, res) => {
   }
 
   const friendsRes = await pool.query(
-    `SELECT friend_user_id
+    `SELECT CASE
+              WHEN user_id = $1 THEN friend_user_id
+              ELSE user_id
+            END AS friend_user_id
      FROM friendships
-     WHERE user_id = $1`,
+     WHERE $1 IN (user_id, friend_user_id)`,
     [userId]
   );
 

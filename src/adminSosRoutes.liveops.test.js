@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import router from "./routes/adminSosRoutes.js";
 import { pool } from "./db.js";
+import { setUserNotificationMulticastSenderForTests } from "./services/userNotifications.js";
 
 function getRoute(path, method) {
   const layer = router.stack.find(
@@ -385,6 +386,451 @@ test("POST /admin/sos/:sosId/acknowledge on already-acknowledged thread refreshe
   );
 });
 
+test("POST /admin/sos/:sosId/resolve stores SAFE terminal state and notifies owner and friends", async (t) => {
+  const originalConnect = pool.connect;
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.connect = originalConnect;
+    pool.query = originalQuery;
+    setUserNotificationMulticastSenderForTests(null);
+  });
+
+  const clientQueries = [];
+  const sentMessages = [];
+  const client = {
+    async query(sql, params) {
+      const text = String(sql);
+      clientQueries.push({ sql: text, params });
+
+      if (/^BEGIN$/i.test(text.trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              thread_id: 55,
+              sos_id: 5,
+              user_id: 42,
+              status: "active",
+              acknowledged_at: "2026-03-19T01:00:00.000Z",
+              emergency_category: "medical",
+              latitude: 16.0431,
+              longitude: 120.3333,
+              address: "Dagupan City"
+            }
+          ]
+        };
+      }
+      if (/UPDATE sos_threads/i.test(text)) {
+        return { rowCount: 1, rows: [] };
+      }
+      if (/INSERT INTO sos_events/i.test(text)) {
+        return { rowCount: 1, rows: [{ id: 901 }] };
+      }
+      if (/^COMMIT$/i.test(text.trim())) {
+        return { rowCount: null, rows: [] };
+      }
+
+      throw new Error(`Unexpected query in test: ${text}`);
+    },
+    release() {}
+  };
+
+  pool.connect = async () => client;
+  pool.query = async (sql, params) => {
+    const text = String(sql);
+    if (/FROM sos_threads st/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            thread_id: 55,
+            sos_id: 5,
+            user_id: 42,
+            full_name: "Reporter One",
+            latest_status: "resolved",
+            terminal_status: "safe",
+            acknowledged_at: "2026-03-19T01:00:00.000Z",
+            acknowledged_by_admin_id: 11,
+            assigned_unit: "Emergency Medical Unit",
+            emergency_category: "medical",
+            latest_latitude: 16.0431,
+            latest_longitude: 120.3333,
+            latest_address: "Dagupan City",
+            requires_attention: false,
+            latest_event_at: "2026-03-19T01:10:00.000Z"
+          }
+        ]
+      };
+    }
+    if (/INSERT INTO user_notifications/i.test(text)) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 102,
+            recipient_user_id: 42,
+            type: "sos_update",
+            title: "SOS Update",
+            message: "Your SOS has been marked safe.",
+            metadata: { sos_id: 5, status: "safe", fallback_route: "/sos/5" },
+            is_read: false,
+            created_at: "2026-03-19T01:10:01.000Z"
+          }
+        ]
+      };
+    }
+    if (/FROM friendships/i.test(text)) {
+      assert.equal(params[0], 42);
+      return {
+        rowCount: 2,
+        rows: [{ friend_user_id: 7 }, { friend_user_id: 8 }]
+      };
+    }
+    if (/FROM devices/i.test(text)) {
+      if (Array.isArray(params?.[0])) {
+        assert.deepEqual(params[0], [7, 8]);
+        return {
+          rowCount: 2,
+          rows: [{ fcm_token: "friend-token-1" }, { fcm_token: "friend-token-2" }]
+        };
+      }
+      return {
+        rowCount: 1,
+        rows: [{ fcm_token: "owner-token-1" }]
+      };
+    }
+    throw new Error(`Unexpected query in test: ${text}`);
+  };
+
+  setUserNotificationMulticastSenderForTests(async (message) => {
+    sentMessages.push(message);
+    return {
+      successCount: Array.isArray(message.tokens) ? message.tokens.length : 1,
+      failureCount: 0,
+      responses: (message.tokens || []).map(() => ({ success: true }))
+    };
+  });
+
+  const stack = getRoute("/admin/sos/:sosId/resolve", "post");
+  const handler = stack[stack.length - 1].handle;
+  const req = {
+    params: { sosId: "5" },
+    body: { note: "SAFE: Friend confirmed okay" },
+    admin: { adminId: 11 }
+  };
+  const res = createRes();
+
+  await handler(req, res);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(
+    clientQueries.some(
+      (entry) =>
+        /UPDATE sos_threads/i.test(entry.sql) &&
+        entry.params[1] === "safe"
+    ),
+    true
+  );
+  assert.equal(
+    clientQueries.some(
+      (entry) =>
+        /INSERT INTO sos_events/i.test(entry.sql) &&
+        entry.params[7] === "safe" &&
+        entry.params[6] === "SAFE: Friend confirmed okay"
+    ),
+    true
+  );
+  assert.equal(sentMessages.length, 2);
+  assert.equal(sentMessages[0].data.sos_id, "5");
+  assert.equal(sentMessages[1].data.terminal_outcome, "safe");
+  assert.equal(sentMessages[1].data.sender_user_id, "42");
+});
+
+test("POST /admin/sos/:sosId/resolve stores CANCELLED terminal state", async (t) => {
+  const originalConnect = pool.connect;
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.connect = originalConnect;
+    pool.query = originalQuery;
+  });
+
+  const clientQueries = [];
+  const client = {
+    async query(sql, params) {
+      const text = String(sql);
+      clientQueries.push({ sql: text, params });
+
+      if (/^BEGIN$/i.test(text.trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              thread_id: 55,
+              sos_id: 5,
+              user_id: 42,
+              status: "active",
+              emergency_category: "medical",
+              latitude: 16.0431,
+              longitude: 120.3333,
+              address: "Dagupan City"
+            }
+          ]
+        };
+      }
+      if (/UPDATE sos_threads/i.test(text)) {
+        return { rowCount: 1, rows: [] };
+      }
+      if (/INSERT INTO sos_events/i.test(text)) {
+        return { rowCount: 1, rows: [{ id: 902 }] };
+      }
+      if (/^COMMIT$/i.test(text.trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      throw new Error(`Unexpected query in test: ${text}`);
+    },
+    release() {}
+  };
+
+  pool.connect = async () => client;
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [
+      {
+        thread_id: 55,
+        sos_id: 5,
+        user_id: 42,
+        full_name: "Reporter One",
+        latest_status: "resolved",
+        terminal_status: "cancelled",
+        acknowledged_at: null,
+        acknowledged_by_admin_id: null,
+        assigned_unit: null,
+        emergency_category: "medical",
+        latest_latitude: 16.0431,
+        latest_longitude: 120.3333,
+        latest_address: "Dagupan City",
+        requires_attention: false,
+        latest_event_at: "2026-03-19T01:10:00.000Z"
+      }
+    ]
+  });
+
+  const stack = getRoute("/admin/sos/:sosId/resolve", "post");
+  const handler = stack[stack.length - 1].handle;
+  const req = {
+    params: { sosId: "5" },
+    body: { note: "CANCELLED: False trigger" },
+    admin: { adminId: 11 }
+  };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(
+    clientQueries.some(
+      (entry) =>
+        /UPDATE sos_threads/i.test(entry.sql) &&
+        entry.params[1] === "cancelled"
+    ),
+    true
+  );
+  assert.equal(
+    clientQueries.some(
+      (entry) =>
+        /INSERT INTO sos_events/i.test(entry.sql) &&
+        entry.params[7] === "cancelled"
+    ),
+    true
+  );
+});
+
+test("POST /admin/sos/:sosId/resolve keeps fallback resolved event without terminal status", async (t) => {
+  const originalConnect = pool.connect;
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.connect = originalConnect;
+    pool.query = originalQuery;
+  });
+
+  const clientQueries = [];
+  const client = {
+    async query(sql, params) {
+      const text = String(sql);
+      clientQueries.push({ sql: text, params });
+
+      if (/^BEGIN$/i.test(text.trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              thread_id: 55,
+              sos_id: 5,
+              user_id: 42,
+              status: "active",
+              emergency_category: "medical",
+              latitude: 16.0431,
+              longitude: 120.3333,
+              address: "Dagupan City"
+            }
+          ]
+        };
+      }
+      if (/UPDATE sos_threads/i.test(text)) {
+        return { rowCount: 1, rows: [] };
+      }
+      if (/INSERT INTO sos_events/i.test(text)) {
+        return { rowCount: 1, rows: [{ id: 903 }] };
+      }
+      if (/^COMMIT$/i.test(text.trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      throw new Error(`Unexpected query in test: ${text}`);
+    },
+    release() {}
+  };
+
+  pool.connect = async () => client;
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [
+      {
+        thread_id: 55,
+        sos_id: 5,
+        user_id: 42,
+        full_name: "Reporter One",
+        latest_status: "resolved",
+        terminal_status: null,
+        acknowledged_at: null,
+        acknowledged_by_admin_id: null,
+        assigned_unit: null,
+        emergency_category: "medical",
+        latest_latitude: 16.0431,
+        latest_longitude: 120.3333,
+        latest_address: "Dagupan City",
+        requires_attention: false,
+        latest_event_at: "2026-03-19T01:10:00.000Z"
+      }
+    ]
+  });
+
+  const stack = getRoute("/admin/sos/:sosId/resolve", "post");
+  const handler = stack[stack.length - 1].handle;
+  const req = {
+    params: { sosId: "5" },
+    body: { note: "Handled by responders" },
+    admin: { adminId: 11 }
+  };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(
+    clientQueries.some(
+      (entry) =>
+        /UPDATE sos_threads/i.test(entry.sql) &&
+        entry.params[1] === null
+    ),
+    true
+  );
+  assert.equal(
+    clientQueries.some(
+      (entry) =>
+        /INSERT INTO sos_events/i.test(entry.sql) &&
+        entry.params[7] === "resolved" &&
+        entry.params[6] === "Handled by responders"
+    ),
+    true
+  );
+});
+
+test("POST /admin/sos/:sosId/resolve returns current state when already resolved", async (t) => {
+  const originalConnect = pool.connect;
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.connect = originalConnect;
+    pool.query = originalQuery;
+  });
+
+  const client = {
+    async query(sql) {
+      const text = String(sql);
+
+      if (/^BEGIN$/i.test(text.trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              thread_id: 55,
+              sos_id: 5,
+              user_id: 42,
+              status: "resolved",
+              emergency_category: "medical",
+              latitude: 16.0431,
+              longitude: 120.3333,
+              address: "Dagupan City"
+            }
+          ]
+        };
+      }
+      if (/^ROLLBACK$/i.test(text.trim())) {
+        return { rowCount: null, rows: [] };
+      }
+      throw new Error(`Unexpected query in test: ${text}`);
+    },
+    release() {}
+  };
+
+  pool.connect = async () => client;
+  pool.query = async () => ({
+    rowCount: 1,
+    rows: [
+      {
+        thread_id: 55,
+        sos_id: 5,
+        user_id: 42,
+        latest_status: "resolved",
+        terminal_status: "safe",
+        acknowledged_at: null,
+        acknowledged_by_admin_id: null,
+        assigned_unit: null,
+        emergency_category: "medical",
+        requires_attention: false,
+        latest_event_at: "2026-03-19T01:10:00.000Z"
+      }
+    ]
+  });
+
+  const stack = getRoute("/admin/sos/:sosId/resolve", "post");
+  const handler = stack[stack.length - 1].handle;
+  const req = {
+    params: { sosId: "5" },
+    body: { note: "SAFE: Already handled" },
+    admin: { adminId: 11 }
+  };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.latest_status, "resolved");
+  assert.equal(res.body.sos_id, 5);
+});
+
 test("GET /admin/sos/live includes snake_case and camelCase ack/unit aliases", async (t) => {
   const originalQuery = pool.query;
   t.after(() => {
@@ -469,6 +915,142 @@ test("GET /admin/sos/:sosId includes snake_case and camelCase ack/unit aliases i
   assert.equal(res.body.thread.acknowledgedAt, "2026-03-07T10:00:00.000Z");
 });
 
+test("GET /admin/sos/:sosId timeline includes actor_name for staff events", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (sql) => {
+    const text = String(sql);
+    if (/FROM sos_threads st/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            thread_id: 55,
+            sos_id: 5,
+            latest_status: "active",
+            terminal_status: null,
+            resolved_source: null,
+            acknowledged_at: "2026-03-07T10:00:00.000Z",
+            acknowledged_by_admin_id: 11,
+            assigned_unit: "Emergency Medical Unit",
+            latest_event_at: "2026-03-07T10:05:00.000Z",
+            requires_attention: false
+          }
+        ]
+      };
+    }
+    if (
+      /FROM sos_events se/i.test(text) &&
+      /LEFT JOIN sos_threads st ON st.id = se.thread_id/i.test(text) &&
+      /LEFT JOIN admins a ON a.id = se.actor_admin_id/i.test(text)
+    ) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 902,
+            thread_id: 55,
+            sos_id: 5,
+            user_id: 42,
+            status: "active",
+            latitude: 16.0431,
+            longitude: 120.3333,
+            address: "Dagupan City",
+            message: "Acknowledged from live feed",
+            created_at: "2026-03-07T10:05:00.000Z",
+            actor_type: "admin",
+            actor_name: "Officer Reyes",
+            actor_admin_id: 11,
+            event_type: "admin_acknowledged",
+            emergency_category: "medical"
+          }
+        ]
+      };
+    }
+    throw new Error(`Unexpected query in test: ${text}`);
+  };
+
+  const stack = getRoute("/admin/sos/:sosId", "get");
+  const handler = stack[stack.length - 1].handle;
+  const req = { params: { sosId: "5" } };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.events[0].actor_type, "admin");
+  assert.equal(res.body.events[0].actor_name, "Officer Reyes");
+});
+
+test("GET /admin/sos/:sosId timeline returns null actor_name when no staff name exists", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async (sql) => {
+    const text = String(sql);
+    if (/FROM sos_threads st/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            thread_id: 55,
+            sos_id: 5,
+            latest_status: "active",
+            terminal_status: null,
+            resolved_source: null,
+            acknowledged_at: null,
+            acknowledged_by_admin_id: null,
+            assigned_unit: null,
+            latest_event_at: "2026-03-07T10:00:00.000Z",
+            requires_attention: true
+          }
+        ]
+      };
+    }
+    if (/FROM sos_events se/i.test(text) && /LEFT JOIN sos_threads st ON st.id = se.thread_id/i.test(text)) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: 903,
+            thread_id: 55,
+            sos_id: 5,
+            user_id: 42,
+            status: "active",
+            latitude: 16.0431,
+            longitude: 120.3333,
+            address: "Dagupan City",
+            message: "Need help",
+            created_at: "2026-03-07T10:00:00.000Z",
+            actor_type: "user",
+            actor_name: null,
+            actor_admin_id: null,
+            event_type: "report_created",
+            emergency_category: "medical"
+          }
+        ]
+      };
+    }
+    throw new Error(`Unexpected query in test: ${text}`);
+  };
+
+  const stack = getRoute("/admin/sos/:sosId", "get");
+  const handler = stack[stack.length - 1].handle;
+  const req = { params: { sosId: "5" } };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.events[0].actor_type, "user");
+  assert.equal(res.body.events[0].actor_name, null);
+});
+
 test("GET /admin/sos/:sosId timeline exposes cancelled terminal status", async (t) => {
   const originalQuery = pool.query;
   t.after(() => {
@@ -512,6 +1094,7 @@ test("GET /admin/sos/:sosId timeline exposes cancelled terminal status", async (
             message: null,
             created_at: "2026-03-07T10:00:00.000Z",
             actor_type: "user",
+            actor_name: null,
             actor_admin_id: null,
             event_type: "status_update",
             emergency_category: "medical"
@@ -531,6 +1114,7 @@ test("GET /admin/sos/:sosId timeline exposes cancelled terminal status", async (
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.events[0].status, "cancelled");
+  assert.equal(res.body.events[0].actor_name, null);
 });
 
 test("GET /admin/sos/live-map returns map rows", async (t) => {

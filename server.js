@@ -9,6 +9,7 @@ import sosRoutes from "./src/routes/sosRoutes.js";
 import friendRoutes from "./src/routes/friendRoutes.js";
 import publicUserRoutes from "./src/routes/publicUserRoutes.js";
 import meRoutes from "./src/routes/meRoutes.js";
+import notificationRoutes from "./src/routes/notificationRoutes.js";
 import adminAuthRoutes from "./src/routes/adminAuthRoutes.js";
 import adminMeRoutes from "./src/routes/adminMeRoutes.js";
 import adminAdminsRoutes from "./src/routes/adminAdminsRoutes.js";
@@ -107,6 +108,7 @@ app.use("/incidents", incidentRateLimit);
 
 // Routes
 app.use(meRoutes);
+app.use(notificationRoutes);
 app.use(deviceRoutes);
 app.use(contactRoutes);
 app.use(sosRoutes);

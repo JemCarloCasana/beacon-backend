@@ -1,11 +1,64 @@
 import express from "express";
 import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
+import {
+  findUserIdByFirebaseUid,
+  FRIEND_PAIR_STATE,
+  getFriendPairState,
+  lockFriendPair,
+} from "../services/friendships.js";
 
 const router = express.Router();
 
 function normalizeBeaconCode(code) {
   return String(code).trim().toUpperCase();
+}
+
+async function createFriendRequestForTargetId(res, currentUserId, targetId) {
+  if (currentUserId === targetId) {
+    return res.status(400).json({ message: "Cannot add yourself" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await lockFriendPair(client, currentUserId, targetId);
+
+    const pairState = await getFriendPairState(client, currentUserId, targetId);
+    if (pairState.state === FRIEND_PAIR_STATE.FRIENDS) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ message: "Already friends", code: "ALREADY_FRIENDS" });
+    }
+    if (pairState.state === FRIEND_PAIR_STATE.PENDING) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        message: "Open friend request already exists",
+        code: "FRIEND_REQUEST_PENDING",
+      });
+    }
+
+    const result = await client.query(
+      `INSERT INTO friend_requests (requester_user_id, addressee_user_id)
+       VALUES ($1, $2)
+       RETURNING id, requester_user_id, addressee_user_id, status, created_at`,
+      [currentUserId, targetId]
+    );
+
+    await client.query("COMMIT");
+    return res.status(201).json(result.rows[0]);
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch {}
+    if (e.code === "23505" && e.constraint === "idx_friend_requests_pending_pair_unique") {
+      return res.status(409).json({
+        message: "Open friend request already exists",
+        code: "FRIEND_REQUEST_PENDING",
+      });
+    }
+    console.error("FRIEND REQUEST ERROR:", e);
+    return res.status(500).json({ message: "Server error" });
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -22,39 +75,37 @@ router.post("/friends/request", requireAppAuth, async (req, res) => {
 
   const code = normalizeBeaconCode(beacon_code);
 
-  // Get current user
-  const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
-  if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
-  const myId = meRes.rows[0].id;
+  const myId = await findUserIdByFirebaseUid(pool, uid);
+  if (myId == null) return res.status(404).json({ message: "User not found" });
 
   // Find target user
   const targetRes = await pool.query("SELECT id FROM users WHERE beacon_code = $1", [code]);
   if (targetRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
-  const targetId = targetRes.rows[0].id;
+  const targetId = Number(targetRes.rows[0].id);
 
-  if (myId === targetId) return res.status(400).json({ message: "Cannot add yourself" });
+  return createFriendRequestForTargetId(res, myId, targetId);
+});
 
-  // Already friends?
-  const friendCheck = await pool.query(
-    `SELECT 1 FROM public.friendships WHERE user_id = $1 AND friend_user_id = $2`,
-    [myId, targetId]
-  );
-  if (friendCheck.rowCount > 0) return res.status(409).json({ message: "Already friends" });
+/**
+ * POST /friends/request/by-user
+ * Body: { user_id }
+ */
+router.post("/friends/request/by-user", requireAppAuth, async (req, res) => {
+  const { uid } = req.auth;
+  const { user_id } = req.body ?? {};
+  const targetId = Number(user_id);
 
-  try {
-    const result = await pool.query(
-      `INSERT INTO friend_requests (requester_user_id, addressee_user_id)
-       VALUES ($1, $2)
-       RETURNING id, requester_user_id, addressee_user_id, status, created_at`,
-      [myId, targetId]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (e) {
-    if (e.code === "23505") return res.status(409).json({ message: "Request already sent" });
-    console.error("FRIEND REQUEST ERROR:", e);
-    res.status(500).json({ message: "Server error" });
+  if (!Number.isInteger(targetId) || targetId < 1) {
+    return res.status(400).json({ message: "Invalid user_id" });
   }
+
+  const myId = await findUserIdByFirebaseUid(pool, uid);
+  if (myId == null) return res.status(404).json({ message: "User not found" });
+
+  const targetRes = await pool.query("SELECT id FROM users WHERE id = $1", [targetId]);
+  if (targetRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
+
+  return createFriendRequestForTargetId(res, myId, targetId);
 });
 
 /**
@@ -64,15 +115,14 @@ router.post("/friends/request", requireAppAuth, async (req, res) => {
 router.get("/friends/requests/incoming", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
 
-  const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
-  if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
-  const myId = meRes.rows[0].id;
+  const myId = await findUserIdByFirebaseUid(pool, uid);
+  if (myId == null) return res.status(404).json({ message: "User not found" });
 
   const r = await pool.query(
     `SELECT fr.id,
             fr.requester_user_id,
+            fr.addressee_user_id,
             u.full_name AS requester_name,
-            u.email AS requester_email,
             u.beacon_code AS requester_beacon_code,
             fr.status,
             fr.created_at
@@ -100,7 +150,7 @@ router.post("/friends/requests/:id/accept", requireAppAuth, async (req, res) => 
   try {
     const meRes = await client.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
     if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
-    const myId = meRes.rows[0].id;
+    const myId = Number(meRes.rows[0].id);
 
     await client.query("BEGIN");
 
@@ -127,33 +177,54 @@ router.post("/friends/requests/:id/accept", requireAppAuth, async (req, res) => 
 
     if (fr.status !== "pending") {
       await client.query("ROLLBACK");
-      return res.status(409).json({ message: `Request already ${fr.status}` });
+      return res.status(409).json({
+        message: "Friend request is no longer pending",
+        code: "STALE_FRIEND_REQUEST",
+        status: fr.status,
+      });
     }
 
-    const requesterId = fr.requester_user_id;
-    const addresseeId = fr.addressee_user_id;
+    const requesterId = Number(fr.requester_user_id);
+    const addresseeId = Number(fr.addressee_user_id);
+    const { lowUserId, highUserId } = await lockFriendPair(client, requesterId, addresseeId);
 
-    // Mark accepted
+    const pairState = await getFriendPairState(client, requesterId, addresseeId);
+    if (pairState.state === FRIEND_PAIR_STATE.FRIENDS) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        message: "Friend request is stale or invalid",
+        code: "STALE_FRIEND_REQUEST",
+      });
+    }
+    if (pairState.state !== FRIEND_PAIR_STATE.PENDING || pairState.pendingRequest?.id !== requestId) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        message: "Friend request is stale or invalid",
+        code: "STALE_FRIEND_REQUEST",
+      });
+    }
+
+    const insertFriendship = await client.query(
+      `INSERT INTO public.friendships (user_id, friend_user_id)
+       VALUES ($1, $2)
+       ON CONFLICT DO NOTHING
+       RETURNING user_id`,
+      [lowUserId, highUserId]
+    );
+
+    if (insertFriendship.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        message: "Friend request is stale or invalid",
+        code: "STALE_FRIEND_REQUEST",
+      });
+    }
+
     await client.query(
       `UPDATE friend_requests
        SET status = 'accepted', updated_at = NOW()
        WHERE id = $1`,
       [requestId]
-    );
-
-    // Friendships both directions (idempotent)
-    await client.query(
-      `INSERT INTO public.friendships (user_id, friend_user_id)
-       VALUES ($1, $2)
-       ON CONFLICT DO NOTHING`,
-      [requesterId, addresseeId]
-    );
-
-    await client.query(
-      `INSERT INTO public.friendships (user_id, friend_user_id)
-       VALUES ($1, $2)
-       ON CONFLICT DO NOTHING`,
-      [addresseeId, requesterId]
     );
 
     await client.query("COMMIT");
@@ -177,9 +248,8 @@ router.post("/friends/requests/:id/reject", requireAppAuth, async (req, res) => 
 
   if (!Number.isFinite(requestId)) return res.status(400).json({ message: "Invalid request id" });
 
-  const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
-  if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
-  const myId = meRes.rows[0].id;
+  const myId = await findUserIdByFirebaseUid(pool, uid);
+  if (myId == null) return res.status(404).json({ message: "User not found" });
 
   const r = await pool.query(
     `UPDATE friend_requests
@@ -204,23 +274,40 @@ router.delete("/friends/:id", requireAppAuth, async (req, res) => {
 
   if (!Number.isFinite(friendId)) return res.status(400).json({ message: "Invalid friend id" });
 
-  const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
-  if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
-  const myId = meRes.rows[0].id;
+  const myId = await findUserIdByFirebaseUid(pool, uid);
+  if (myId == null) return res.status(404).json({ message: "User not found" });
 
   if (myId === friendId) return res.status(400).json({ message: "Cannot remove yourself" });
 
-  const r = await pool.query(
-    `DELETE FROM public.friendships
-     WHERE (user_id = $1 AND friend_user_id = $2)
-        OR (user_id = $2 AND friend_user_id = $1)
-     RETURNING user_id, friend_user_id`,
-    [myId, friendId]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { lowUserId, highUserId } = await lockFriendPair(client, myId, friendId);
 
-  if (r.rowCount === 0) return res.status(404).json({ message: "Friendship not found" });
+    await client.query(
+      `DELETE FROM public.friendships
+       WHERE user_id = $1 AND friend_user_id = $2`,
+      [lowUserId, highUserId]
+    );
 
-  res.json({ ok: true });
+    await client.query(
+      `UPDATE public.friend_requests
+       SET status = 'cancelled', updated_at = NOW()
+       WHERE LEAST(requester_user_id, addressee_user_id) = $1
+         AND GREATEST(requester_user_id, addressee_user_id) = $2
+         AND status = 'pending'`,
+      [lowUserId, highUserId]
+    );
+
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch {}
+    console.error("UNFRIEND ERROR:", e);
+    res.status(500).json({ message: "Server error" });
+  } finally {
+    client.release();
+  }
 });
 
 /**
@@ -233,9 +320,8 @@ router.get("/friends/search", requireAppAuth, async (req, res) => {
 
   if (!q) return res.status(400).json({ message: "Missing search query" });
 
-  const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
-  if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
-  const myId = meRes.rows[0].id;
+  const myId = await findUserIdByFirebaseUid(pool, uid);
+  if (myId == null) return res.status(404).json({ message: "User not found" });
 
   const search = `%${q}%`;
   const r = await pool.query(
@@ -245,8 +331,12 @@ router.get("/friends/search", requireAppAuth, async (req, res) => {
             u.phone_number,
             u.beacon_code
      FROM public.friendships f
-     JOIN users u ON u.id = f.friend_user_id
-     WHERE f.user_id = $1
+     JOIN users u
+       ON u.id = CASE
+         WHEN f.user_id = $1 THEN f.friend_user_id
+         ELSE f.user_id
+       END
+     WHERE $1 IN (f.user_id, f.friend_user_id)
        AND (
          u.full_name ILIKE $2
          OR u.email ILIKE $2
@@ -267,9 +357,8 @@ router.get("/friends/search", requireAppAuth, async (req, res) => {
 router.get("/friends", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
 
-  const meRes = await pool.query("SELECT id FROM users WHERE firebase_uid = $1", [uid]);
-  if (meRes.rowCount === 0) return res.status(404).json({ message: "User not found" });
-  const myId = meRes.rows[0].id;
+  const myId = await findUserIdByFirebaseUid(pool, uid);
+  if (myId == null) return res.status(404).json({ message: "User not found" });
 
   const r = await pool.query(
     `SELECT u.id,
@@ -278,8 +367,12 @@ router.get("/friends", requireAppAuth, async (req, res) => {
             u.phone_number,
             u.beacon_code
      FROM public.friendships f
-     JOIN users u ON u.id = f.friend_user_id
-     WHERE f.user_id = $1
+     JOIN users u
+       ON u.id = CASE
+         WHEN f.user_id = $1 THEN f.friend_user_id
+         ELSE f.user_id
+       END
+     WHERE $1 IN (f.user_id, f.friend_user_id)
      ORDER BY u.full_name ASC`,
     [myId]
   );

@@ -1,7 +1,9 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import { requireAdminAuth } from "../middleware/adminAuth.js";
+import { notifyUserLifecycleEvent } from "../services/userNotifications.js";
 
 const router = express.Router();
 const MAX_IMAGES_PER_INCIDENT = 5;
@@ -20,6 +22,14 @@ function logDebug(event, payload) {
     return;
   }
   console.debug(`[incident-routes] ${event}`, payload);
+}
+
+function getRequestTrace(req, overrides = {}) {
+  return {
+    requestId: req.get?.("x-request-id") || randomUUID(),
+    adminId: Number(req.admin?.adminId ?? null),
+    ...overrides,
+  };
 }
 
 async function notifyAdminsAboutIncident({ incidentId, incidentType }) {
@@ -440,6 +450,11 @@ router.patch(
       if (!incidentId) {
         return res.status(400).json({ message: "Invalid incident id" });
       }
+      const trace = getRequestTrace(req, {
+        action: "admin_incident_update",
+        entityType: "incident",
+        entityId: incidentId,
+      });
 
       const nextStatus =
         typeof req.body?.status === "string" ? req.body.status.trim().toLowerCase() : undefined;
@@ -527,7 +542,9 @@ router.patch(
         `
         SELECT
           id,
+          user_id,
           status,
+          assigned_department,
           dispatched_at,
           resolved_at
         FROM incident_reports
@@ -544,6 +561,24 @@ router.patch(
 
       const current = currentResult.rows[0];
       const effectiveStatus = nextStatus ?? current.status;
+      const shouldNotifySender =
+        nextStatus !== undefined &&
+        current.status !== effectiveStatus &&
+        ["dispatched", "in_progress", "resolved"].includes(effectiveStatus);
+      if (!shouldNotifySender) {
+        console.info("[incident-routes] sender notification skipped", {
+          ...trace,
+          currentStatus: current.status,
+          nextStatus: nextStatus ?? null,
+          effectiveStatus,
+          reason:
+            nextStatus === undefined
+              ? "status_unchanged_or_missing"
+              : current.status === effectiveStatus
+                ? "status_unchanged_or_missing"
+                : "non_milestone_status",
+        });
+      }
       if (!canTransitionStatus(current.status, effectiveStatus)) {
         await client.query("ROLLBACK");
         return res.status(409).json({ message: "Invalid status transition" });
@@ -599,6 +634,44 @@ router.patch(
 
       await client.query("COMMIT");
       const updated = await getIncidentById(updateResult.rows[0].id);
+      if (shouldNotifySender) {
+        console.info("[incident-routes] sender notification dispatch queued", {
+          ...trace,
+          recipientUserId: Number(current.user_id ?? null),
+          status: effectiveStatus,
+          assignedDepartment: updated?.assigned_department ?? current.assigned_department ?? null,
+        });
+        notifyUserLifecycleEvent({
+          recipient_user_id: current.user_id,
+          entity_type: "incident",
+          entity_id: updateResult.rows[0].id,
+          status: effectiveStatus,
+          assigned_department: updated?.assigned_department ?? current.assigned_department ?? null,
+          trace: {
+            ...trace,
+            recipientUserId: Number(current.user_id ?? null),
+            notificationType: "incident_update",
+            status: effectiveStatus,
+          }
+        })
+          .then((result) => {
+            console.info("[incident-routes] sender notification result", {
+              ...trace,
+              recipientUserId: Number(current.user_id ?? null),
+              status: effectiveStatus,
+              notificationId: result?.notification?.id ?? null,
+              skipped: result?.skipped ?? false,
+              reason: result?.reason ?? result?.push?.reason ?? result?.push?.error ?? null,
+              push: result?.push ?? null,
+            });
+          })
+          .catch((notifyErr) => {
+            console.error("sender incident notification failed:", notifyErr?.message || notifyErr, {
+              ...trace,
+              recipientUserId: Number(current.user_id ?? null),
+            });
+          });
+      }
       return res.json(toIncidentDto(updated, { isAdminRoute: true }));
     } catch (err) {
       try {

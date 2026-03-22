@@ -1,4 +1,5 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import { pool } from "../db.js";
 import { requireAdminAuth } from "../middleware/adminAuth.js";
 import {
@@ -19,6 +20,7 @@ import {
   writeHeartbeat,
   writeSnapshotToStream
 } from "../services/sosLiveOps.js";
+import { notifySosFriendsTerminalEvent, notifyUserLifecycleEvent } from "../services/userNotifications.js";
 
 const router = express.Router();
 const MAX_NOTE_LENGTH = 1000;
@@ -66,6 +68,20 @@ function parseAssignedUnit(body) {
   return value;
 }
 
+function parseResolveOutcome(note) {
+  if (typeof note !== "string") {
+    return "resolved";
+  }
+  const normalized = note.trim().toUpperCase();
+  if (normalized.startsWith("CANCELLED:")) {
+    return "cancelled";
+  }
+  if (normalized.startsWith("SAFE:")) {
+    return "safe";
+  }
+  return "resolved";
+}
+
 function buildActionResponse(thread) {
   return {
     ok: true,
@@ -81,6 +97,14 @@ function buildActionResponse(thread) {
     emergency_category: thread.emergency_category,
     requires_attention: Boolean(thread.requires_attention),
     latest_event_at: thread.latest_event_at
+  };
+}
+
+function getRequestTrace(req, overrides = {}) {
+  return {
+    requestId: req.get?.("x-request-id") || randomUUID(),
+    adminId: Number(req.admin?.adminId ?? null),
+    ...overrides,
   };
 }
 
@@ -166,6 +190,11 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, async (req, res) 
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });
   }
+  const trace = getRequestTrace(req, {
+    action: "admin_sos_acknowledge",
+    entityType: "sos",
+    entityId: sosId,
+  });
 
   const note = parseOptionalNote(req.body);
   if (note?.error) {
@@ -229,6 +258,47 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, async (req, res) 
     publishSosDeltaBySosId(sosId).catch((publishErr) => {
       console.error("publish SOS delta error (acknowledge):", publishErr);
     });
+    console.info("[admin-sos] sender notification dispatch queued", {
+      ...trace,
+      recipientUserId: Number(current.user_id ?? null),
+      status: "acknowledged",
+      assignedUnit: current.assigned_unit ?? null,
+    });
+    notifyUserLifecycleEvent({
+      recipient_user_id: current.user_id,
+      entity_type: "sos",
+      entity_id: current.sos_id,
+      status: "acknowledged",
+      assigned_unit: current.assigned_unit ?? null,
+      sender_name: current.full_name ?? null,
+      latitude: current.latest_latitude ?? null,
+      longitude: current.latest_longitude ?? null,
+      address: current.latest_address ?? null,
+      category: current.emergency_category ?? null,
+      trace: {
+        ...trace,
+        recipientUserId: Number(current.user_id ?? null),
+        notificationType: "sos_update",
+        status: "acknowledged",
+      }
+    })
+      .then((result) => {
+        console.info("[admin-sos] sender notification result", {
+          ...trace,
+          recipientUserId: Number(current.user_id ?? null),
+          status: "acknowledged",
+          notificationId: result?.notification?.id ?? null,
+          skipped: result?.skipped ?? false,
+          reason: result?.reason ?? result?.push?.reason ?? result?.push?.error ?? null,
+          push: result?.push ?? null,
+        });
+      })
+      .catch((notifyErr) => {
+        console.error("sender SOS notification failed (acknowledge):", notifyErr?.message || notifyErr, {
+          ...trace,
+          recipientUserId: Number(current.user_id ?? null),
+        });
+      });
     return res.json(buildActionResponse(current));
   } catch (err) {
     try {
@@ -246,11 +316,17 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });
   }
+  const trace = getRequestTrace(req, {
+    action: "admin_sos_resolve",
+    entityType: "sos",
+    entityId: sosId,
+  });
 
   const note = parseOptionalNote(req.body);
   if (note?.error) {
     return res.status(400).json({ message: note.error });
   }
+  const terminalOutcome = parseResolveOutcome(note);
 
   const client = await pool.connect();
 
@@ -280,10 +356,11 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
       SET
         latest_status = 'resolved',
         resolved_at = COALESCE(resolved_at, NOW()),
+        terminal_status = $2,
         updated_at = NOW()
       WHERE id = $1
       `,
-      [latest.thread_id]
+      [latest.thread_id, terminalOutcome === "resolved" ? null : terminalOutcome]
     );
 
     await appendAdminStatusEvent(client, {
@@ -291,7 +368,7 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
       sosId,
       adminId: Number(req.admin.adminId),
       userId: Number(latest.user_id),
-      status: "resolved",
+      status: terminalOutcome,
       note: typeof note === "string" ? note : null,
       latitude: latest.latitude,
       longitude: latest.longitude,
@@ -310,6 +387,84 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
     publishSosDeltaBySosId(sosId).catch((publishErr) => {
       console.error("publish SOS delta error (resolve):", publishErr);
     });
+    console.info("[admin-sos] sender notification dispatch queued", {
+      ...trace,
+      recipientUserId: Number(current.user_id ?? null),
+      status: current.terminal_status ?? "resolved",
+      assignedUnit: current.assigned_unit ?? null,
+    });
+    notifyUserLifecycleEvent({
+      recipient_user_id: current.user_id,
+      entity_type: "sos",
+      entity_id: current.sos_id,
+      status: current.terminal_status ?? "resolved",
+      assigned_unit: current.assigned_unit ?? null,
+      sender_name: current.full_name ?? null,
+      latitude: current.latest_latitude ?? null,
+      longitude: current.latest_longitude ?? null,
+      address: current.latest_address ?? null,
+      category: current.emergency_category ?? null,
+      trace: {
+        ...trace,
+        recipientUserId: Number(current.user_id ?? null),
+        notificationType: "sos_update",
+        status: current.terminal_status ?? "resolved",
+      }
+    })
+      .then((result) => {
+        console.info("[admin-sos] sender notification result", {
+          ...trace,
+          recipientUserId: Number(current.user_id ?? null),
+          status: current.terminal_status ?? "resolved",
+          notificationId: result?.notification?.id ?? null,
+          skipped: result?.skipped ?? false,
+          reason: result?.reason ?? result?.push?.reason ?? result?.push?.error ?? null,
+          push: result?.push ?? null,
+        });
+      })
+      .catch((notifyErr) => {
+        console.error("sender SOS notification failed (resolve):", notifyErr?.message || notifyErr, {
+          ...trace,
+          recipientUserId: Number(current.user_id ?? null),
+        });
+      });
+    console.info("[admin-sos] friend terminal notification dispatch queued", {
+      ...trace,
+      ownerUserId: Number(current.user_id ?? null),
+      status: current.terminal_status ?? "resolved",
+    });
+    notifySosFriendsTerminalEvent({
+      owner_user_id: current.user_id,
+      sos_id: current.sos_id,
+      terminal_outcome: current.terminal_status ?? "resolved",
+      sender_name: current.full_name ?? null,
+      latitude: current.latest_latitude ?? null,
+      longitude: current.latest_longitude ?? null,
+      address: current.latest_address ?? null,
+      category: current.emergency_category ?? null,
+      trace: {
+        ...trace,
+        recipientUserId: Number(current.user_id ?? null),
+        notificationType: "sos_update",
+        status: current.terminal_status ?? "resolved",
+      }
+    })
+      .then((result) => {
+        console.info("[admin-sos] friend terminal notification result", {
+          ...trace,
+          ownerUserId: Number(current.user_id ?? null),
+          status: current.terminal_status ?? "resolved",
+          recipientCount: Array.isArray(result?.recipients) ? result.recipients.length : 0,
+          reason: result?.reason ?? result?.push?.reason ?? result?.push?.error ?? null,
+          push: result?.push ?? null,
+        });
+      })
+      .catch((notifyErr) => {
+        console.error("friend SOS notification failed (resolve):", notifyErr?.message || notifyErr, {
+          ...trace,
+          ownerUserId: Number(current.user_id ?? null),
+        });
+      });
     return res.json(buildActionResponse(current));
   } catch (err) {
     try {

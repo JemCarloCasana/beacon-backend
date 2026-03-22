@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import router from "./routes/meRoutes.js";
 import { pool } from "./db.js";
+import { requireAppAuth } from "./middleware/requireAppAuth.js";
 
 function findRouteHandler(path, method) {
   const layer = router.stack.find(
@@ -32,6 +33,7 @@ function createRes() {
 const bootstrapHandler = findRouteHandler("/me/bootstrap", "post");
 const getMeHandler = findRouteHandler("/me", "get");
 const getUsersHandler = findRouteHandler("/users", "get");
+const searchUsersHandler = findRouteHandler("/users/search", "get");
 
 function createBootstrapClient({
   existingBeaconCode = null,
@@ -259,4 +261,140 @@ test("GET /me and GET /users return normalized app role values", async (t) => {
   await getUsersHandler({ auth: { uid: "new-uid" } }, usersRes);
   assert.equal(usersRes.statusCode, 200);
   assert.equal(usersRes.body.role, "student");
+});
+
+test("GET /users/search is protected by requireAppAuth", () => {
+  const layer = router.stack.find(
+    (entry) => entry.route?.path === "/users/search" && entry.route.methods?.get
+  );
+
+  assert.ok(layer);
+  assert.equal(layer.route.stack[0].handle, requireAppAuth);
+});
+
+test("GET /users/search returns 400 for missing, empty, or too-short queries", async (t) => {
+  const invalidQueries = [undefined, "", " ", "a"];
+
+  for (const q of invalidQueries) {
+    const req = {
+      auth: { uid: "search-uid" },
+      query: q === undefined ? {} : { q },
+    };
+    const res = createRes();
+
+    await searchUsersHandler(req, res);
+
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.body, { message: "Search query must be at least 2 characters" });
+  }
+});
+
+test("GET /users/search returns 404 when the authenticated user has no profile row", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  pool.query = async () => ({ rowCount: 0, rows: [] });
+
+  const req = {
+    auth: { uid: "missing-user" },
+    query: { q: "john" },
+  };
+  const res = createRes();
+
+  await searchUsersHandler(req, res);
+
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(res.body, { message: "User not found. Call /me/bootstrap first." });
+});
+
+test("GET /users/search performs case-insensitive multi-word discovery with stable ordering and friendship status", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  let queryCount = 0;
+  pool.query = async (text, values) => {
+    queryCount += 1;
+    if (queryCount === 1) {
+      assert.match(String(text), /SELECT id\s+FROM users\s+WHERE firebase_uid = \$1/i);
+      assert.deepEqual(values, ["search-uid"]);
+      return { rowCount: 1, rows: [{ id: 77 }] };
+    }
+
+    assert.match(String(text), /FROM users u/i);
+    assert.match(String(text), /LOWER\(u\.full_name\) LIKE \$4/i);
+    assert.match(String(text), /LOWER\(u\.full_name\) LIKE \$5/i);
+    assert.match(String(text), /u\.id <> \$1/i);
+    assert.match(String(text), /CASE\s+WHEN LOWER\(u\.full_name\) = \$2 THEN 0/i);
+    assert.deepEqual(values, [77, "john sm", "john sm%", "%john%", "%sm%", 20]);
+
+    return {
+      rowCount: 4,
+      rows: [
+        {
+          id: 11,
+          full_name: "John Smalls",
+          beacon_code: "BCN-JS1111",
+          friendship_status: "already_friends",
+        },
+        {
+          id: 12,
+          full_name: "Johnny Smalls",
+          beacon_code: "BCN-JS2222",
+          friendship_status: "incoming_pending",
+        },
+        {
+          id: 13,
+          full_name: "Alice Johnson Smith",
+          beacon_code: "BCN-AJS33",
+          friendship_status: "outgoing_pending",
+        },
+        {
+          id: 14,
+          full_name: "Elton John Smithe",
+          beacon_code: "BCN-EJS44",
+          friendship_status: "none",
+        },
+      ],
+    };
+  };
+
+  const req = {
+    auth: { uid: "search-uid" },
+    query: { q: "  JoHn   Sm " },
+  };
+  const res = createRes();
+
+  await searchUsersHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, [
+    {
+      id: 11,
+      full_name: "John Smalls",
+      beacon_code: "BCN-JS1111",
+      friendship_status: "already_friends",
+    },
+    {
+      id: 12,
+      full_name: "Johnny Smalls",
+      beacon_code: "BCN-JS2222",
+      friendship_status: "incoming_pending",
+    },
+    {
+      id: 13,
+      full_name: "Alice Johnson Smith",
+      beacon_code: "BCN-AJS33",
+      friendship_status: "outgoing_pending",
+    },
+    {
+      id: 14,
+      full_name: "Elton John Smithe",
+      beacon_code: "BCN-EJS44",
+      friendship_status: "none",
+    },
+  ]);
 });

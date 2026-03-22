@@ -291,11 +291,13 @@ export async function listThreadEvents(sosId) {
       se.message,
       se.created_at,
       se.actor_type,
+      a.full_name AS actor_name,
       se.actor_admin_id,
       se.event_type,
       se.emergency_category
     FROM sos_events se
     LEFT JOIN sos_threads st ON st.id = se.thread_id
+    LEFT JOIN admins a ON a.id = se.actor_admin_id
     WHERE se.sos_id = $1
     ORDER BY se.created_at ASC, se.id ASC
     `,

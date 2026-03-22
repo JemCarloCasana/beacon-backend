@@ -9,6 +9,8 @@ const PHONE_REGEX = /^(?:\+63|0)\d{10}$/;
 const PATCH_PHONE_REGEX = /^\+?\d{10,20}$/;
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const APP_USER_ROLES = new Set(["citizen", "student"]);
+const USER_SEARCH_MIN_QUERY_LENGTH = 2;
+const USER_SEARCH_LIMIT = 20;
 const USER_SELECT_FIELDS = `
   id,
   firebase_uid,
@@ -114,6 +116,12 @@ function normalizeAppUserRole(role) {
   const normalized = role.trim().toLowerCase();
   if (!APP_USER_ROLES.has(normalized)) return null;
   return normalized;
+}
+
+function normalizeSearchQuery(rawQuery) {
+  return String(rawQuery ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
 /**
@@ -226,17 +234,24 @@ router.get("/me", requireAppAuth, async (req, res) => {
  */
 router.patch("/me", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
-  const { full_name, email, phone_number, profile_image_url } = req.body || {};
+  const { full_name, email, phone_number, role, profile_image_url } = req.body || {};
 
   let normalizedFullName;
   let normalizedEmail;
   let normalizedPhoneNumber;
+  let normalizedRole;
   let normalizedProfileImageUrl;
 
   try {
     normalizedFullName = validateOptionalFullName(full_name);
     normalizedEmail = validateOptionalEmail(email);
     normalizedPhoneNumber = validateOptionalPatchPhone(phone_number);
+    if (role != null) {
+      normalizedRole = normalizeAppUserRole(role);
+      if (!normalizedRole) {
+        throw new Error("Invalid role");
+      }
+    }
     normalizedProfileImageUrl = validateOptionalProfileImageUrl(profile_image_url);
   } catch (err) {
     return res.status(400).json({ message: err?.message || "Invalid request body" });
@@ -256,6 +271,10 @@ router.patch("/me", requireAppAuth, async (req, res) => {
   if (phone_number != null) {
     updates.push(`phone_number = $${values.length + 1}`);
     values.push(normalizedPhoneNumber);
+  }
+  if (role != null) {
+    updates.push(`role = $${values.length + 1}`);
+    values.push(normalizedRole);
   }
   if (profile_image_url != null) {
     updates.push(`profile_image_url = $${values.length + 1}`);
@@ -309,6 +328,84 @@ router.get("/users", requireAppAuth, async (req, res) => {
   }
 
   return res.json(result.rows[0]);
+});
+
+/**
+ * GET /users/search?q=...
+ * Searches app users by full_name and returns lightweight discovery results.
+ */
+router.get("/users/search", requireAppAuth, async (req, res) => {
+  const { uid } = req.auth;
+  const normalizedQuery = normalizeSearchQuery(req.query.q);
+
+  if (normalizedQuery.length < USER_SEARCH_MIN_QUERY_LENGTH) {
+    return res.status(400).json({
+      message: `Search query must be at least ${USER_SEARCH_MIN_QUERY_LENGTH} characters`,
+    });
+  }
+
+  const meResult = await pool.query(
+    `SELECT id
+     FROM users
+     WHERE firebase_uid = $1`,
+    [uid]
+  );
+
+  if (meResult.rowCount === 0) {
+    return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
+  }
+
+  const myId = Number(meResult.rows[0].id);
+  const searchTokens = normalizedQuery
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean);
+  const tokenClauses = searchTokens.map(
+    (_, index) => `LOWER(u.full_name) LIKE $${index + 4}`
+  );
+  const tokenValues = searchTokens.map((token) => `%${token}%`);
+  const exactMatchValue = normalizedQuery.toLowerCase();
+  const startsWithValue = `${exactMatchValue}%`;
+
+  const result = await pool.query(
+    `SELECT u.id,
+            u.full_name,
+            u.beacon_code,
+            CASE
+              WHEN f.user_id IS NOT NULL THEN 'already_friends'
+              WHEN fr.id IS NOT NULL AND fr.requester_user_id = u.id THEN 'incoming_pending'
+              WHEN fr.id IS NOT NULL AND fr.addressee_user_id = u.id THEN 'outgoing_pending'
+              ELSE 'none'
+            END AS friendship_status
+     FROM users u
+     LEFT JOIN public.friendships f
+       ON f.user_id = LEAST($1, u.id)
+      AND f.friend_user_id = GREATEST($1, u.id)
+     LEFT JOIN LATERAL (
+       SELECT fr.id,
+              fr.requester_user_id,
+              fr.addressee_user_id
+       FROM public.friend_requests fr
+       WHERE LEAST(fr.requester_user_id, fr.addressee_user_id) = LEAST($1, u.id)
+         AND GREATEST(fr.requester_user_id, fr.addressee_user_id) = GREATEST($1, u.id)
+         AND fr.status = 'pending'
+       ORDER BY fr.created_at DESC, fr.id DESC
+       LIMIT 1
+     ) fr ON TRUE
+     WHERE u.id <> $1
+       AND ${tokenClauses.join("\n       AND ")}
+     ORDER BY CASE
+                WHEN LOWER(u.full_name) = $2 THEN 0
+                WHEN LOWER(u.full_name) LIKE $3 THEN 1
+                ELSE 2
+              END,
+              u.full_name ASC,
+              u.id ASC
+     LIMIT $${tokenValues.length + 4}`,
+    [myId, exactMatchValue, startsWithValue, ...tokenValues, USER_SEARCH_LIMIT]
+  );
+
+  return res.json(result.rows);
 });
 
 export default router;

@@ -10,29 +10,30 @@ const RANGE_TO_WINDOW_MS = {
   "7d": 7 * 24 * 60 * 60 * 1000,
   "30d": 30 * 24 * 60 * 60 * 1000
 };
+const INCIDENT_PRIORITY_BUCKETS = ["low", "medium", "high", "critical"];
 const REPORT_DEFS = {
-  daily_incident_summary: {
-    key: "daily_incident_summary",
+  daily_safety_report: {
+    report_key: "daily_safety_report",
     range: "24h",
-    title: "Daily Incident Summary",
-    description: "Overview of all incidents reported in the last 24 hours"
+    title: "Daily Safety Report",
+    description: "Combined incident and SOS overview for the last 24 hours"
   },
-  weekly_response_analysis: {
-    key: "weekly_response_analysis",
+  weekly_safety_report: {
+    report_key: "weekly_safety_report",
     range: "7d",
-    title: "Weekly Response Analysis",
-    description: "Response times and resolution rates for the past week"
+    title: "Weekly Safety Report",
+    description: "Combined incident and SOS overview for the last 7 days"
   },
   monthly_safety_report: {
-    key: "monthly_safety_report",
+    report_key: "monthly_safety_report",
     range: "30d",
     title: "Monthly Safety Report",
-    description: "Comprehensive monthly report with trends and insights"
+    description: "Combined incident and SOS overview for the last 30 days"
   }
 };
 const CARD_ORDER = [
-  REPORT_DEFS.daily_incident_summary,
-  REPORT_DEFS.weekly_response_analysis,
+  REPORT_DEFS.daily_safety_report,
+  REPORT_DEFS.weekly_safety_report,
   REPORT_DEFS.monthly_safety_report
 ];
 
@@ -74,8 +75,46 @@ function toInt(value) {
   return Math.round(toNumber(value));
 }
 
+function formatSosCategoryLabel(value) {
+  switch (String(value ?? "").trim().toLowerCase()) {
+    case "medical":
+      return "Medical";
+    case "fire":
+      return "Fire";
+    case "violence":
+      return "Violence";
+    case "unknown":
+      return "Unknown";
+    default:
+      return value ?? "";
+  }
+}
+
+function buildPriorityBuckets(rows) {
+  const counts = new Map(INCIDENT_PRIORITY_BUCKETS.map((priority) => [priority, 0]));
+
+  for (const row of rows) {
+    const normalizedLabel = String(row?.label ?? "")
+      .trim()
+      .toLowerCase();
+    if (!counts.has(normalizedLabel)) {
+      continue;
+    }
+    counts.set(normalizedLabel, counts.get(normalizedLabel) + toInt(row?.value));
+  }
+
+  return INCIDENT_PRIORITY_BUCKETS.map((priority) => ({
+    label: priority,
+    value: counts.get(priority) ?? 0
+  }));
+}
+
 function getGranularity(range) {
   return range === "24h" ? "hour" : "day";
+}
+
+function getWindowStart(range, now = new Date()) {
+  return new Date(now.getTime() - RANGE_TO_WINDOW_MS[range]);
 }
 
 function shiftToManila(date) {
@@ -159,12 +198,12 @@ async function getCardsMetadata(timezone) {
 
   return CARD_ORDER.map((card) => ({
     ...card,
-    last_generated_at: lastGeneratedMap.get(`${card.key}|${card.range}`) ?? null
+    last_generated_at: lastGeneratedMap.get(`${card.report_key}|${card.range}`) ?? null
   }));
 }
 
 async function buildAnalytics({ range, timezone, now = new Date() }) {
-  const windowStart = new Date(now.getTime() - RANGE_TO_WINDOW_MS[range]);
+  const windowStart = getWindowStart(range, now);
   const granularity = getGranularity(range);
   const bucketExpr =
     granularity === "hour"
@@ -300,6 +339,28 @@ async function buildAnalytics({ range, timezone, now = new Date() }) {
     [windowStart.toISOString()]
   );
 
+  const incidentCategoriesResult = await pool.query(
+    `
+    SELECT incident_type AS label, COUNT(*)::int AS value
+    FROM incident_reports
+    WHERE created_at >= $1
+    GROUP BY incident_type
+    ORDER BY COUNT(*) DESC, incident_type ASC
+    `,
+    [windowStart.toISOString()]
+  );
+
+  const sosCategoriesResult = await pool.query(
+    `
+    SELECT st.emergency_category AS label, COUNT(*)::int AS value
+    FROM sos_threads st
+    WHERE st.created_at >= $1
+    GROUP BY st.emergency_category
+    ORDER BY COUNT(*) DESC, st.emergency_category ASC
+    `,
+    [windowStart.toISOString()]
+  );
+
   const bucketKeys = generateBucketKeys({ start: windowStart, end: now, granularity });
   const incidentBucketMap = new Map(
     incidentTrendResult.rows.map((row) => [String(row.bucket_key), toInt(row.incidents)])
@@ -332,10 +393,7 @@ async function buildAnalytics({ range, timezone, now = new Date() }) {
         label: row.label,
         value: toInt(row.value)
       })),
-      incidents_by_priority: priorityResult.rows.map((row) => ({
-        label: row.label,
-        value: toInt(row.value)
-      })),
+      incidents_by_priority: buildPriorityBuckets(priorityResult.rows),
       incidents_trend: bucketKeys.map((bucketKey) => ({
         bucket: bucketKey,
         incidents: incidentBucketMap.get(bucketKey) ?? 0,
@@ -348,12 +406,85 @@ async function buildAnalytics({ range, timezone, now = new Date() }) {
           avg_response_seconds: value?.avg_response_seconds ?? 0,
           avg_resolution_seconds: value?.avg_resolution_seconds ?? 0
         };
-      })
+      }),
+      incident_categories_frequency: incidentCategoriesResult.rows.map((row) => ({
+        label: row.label,
+        value: toInt(row.value)
+      })),
+      sos_categories_frequency: sosCategoriesResult.rows.map((row) => ({
+        label: formatSosCategoryLabel(row.label),
+        value: toInt(row.value)
+      }))
     }
   };
 }
 
-function buildCsvPayload(reportPayload) {
+async function getCsvDetails({ range, now = new Date() }) {
+  const windowStart = getWindowStart(range, now);
+  const incidentResult = await pool.query(
+    `
+    SELECT
+      id,
+      incident_type,
+      status,
+      priority,
+      assigned_department,
+      address,
+      created_at,
+      dispatched_at,
+      resolved_at
+    FROM incident_reports
+    WHERE created_at >= $1
+    ORDER BY created_at DESC, id DESC
+    `,
+    [windowStart.toISOString()]
+  );
+
+  const sosResult = await pool.query(
+    `
+    SELECT
+      st.root_event_id AS sos_id,
+      st.latest_status,
+      st.emergency_category,
+      st.assigned_unit,
+      st.terminal_status,
+      root.address,
+      root.created_at AS opened_at,
+      st.resolved_at
+    FROM sos_threads st
+    LEFT JOIN sos_events root ON root.id = st.root_event_id
+    WHERE st.created_at >= $1
+    ORDER BY st.created_at DESC, st.root_event_id DESC
+    `,
+    [windowStart.toISOString()]
+  );
+
+  return {
+    incidents: incidentResult.rows.map((row) => ({
+      id: row.id,
+      incident_type: row.incident_type ?? "",
+      status: row.status ?? "",
+      priority: row.priority ?? "",
+      assigned_department: row.assigned_department ?? "",
+      address: row.address ?? "",
+      created_at: toIso(row.created_at) ?? "",
+      dispatched_at: toIso(row.dispatched_at) ?? "",
+      resolved_at: toIso(row.resolved_at) ?? ""
+    })),
+    sos: sosResult.rows.map((row) => ({
+      sos_id: row.sos_id,
+      latest_status: row.latest_status ?? "",
+      emergency_category: formatSosCategoryLabel(row.emergency_category),
+      assigned_unit: row.assigned_unit ?? "",
+      terminal_status: row.terminal_status ?? "",
+      address: row.address ?? "",
+      opened_at: toIso(row.opened_at) ?? "",
+      resolved_at: toIso(row.resolved_at) ?? ""
+    }))
+  };
+}
+
+function buildCsvPayload(reportPayload, details) {
   const { generated_at, range, timezone, kpis, charts } = reportPayload;
   const responseTrendMap = new Map(
     charts.response_time_trend.map((row) => [
@@ -387,6 +518,14 @@ function buildCsvPayload(reportPayload) {
     ["label", "value"],
     ...charts.incidents_by_priority.map((row) => [row.label, row.value]),
     [],
+    ["Incident Category Frequency"],
+    ["label", "value"],
+    ...charts.incident_categories_frequency.map((row) => [row.label, row.value]),
+    [],
+    ["SOS Category Frequency"],
+    ["label", "value"],
+    ...charts.sos_categories_frequency.map((row) => [row.label, row.value]),
+    [],
     ["Trend Rows"],
     ["bucket", "incidents", "sos", "avg_response_seconds", "avg_resolution_seconds"],
     ...charts.incidents_trend.map((row) => {
@@ -401,7 +540,53 @@ function buildCsvPayload(reportPayload) {
         response.avg_response_seconds,
         response.avg_resolution_seconds
       ];
-    })
+    }),
+    [],
+    ["Incident Details"],
+    [
+      "incident_id",
+      "incident_type",
+      "status",
+      "priority",
+      "assigned_department",
+      "address",
+      "created_at",
+      "dispatched_at",
+      "resolved_at"
+    ],
+    ...details.incidents.map((row) => [
+      row.id,
+      row.incident_type,
+      row.status,
+      row.priority,
+      row.assigned_department,
+      row.address,
+      row.created_at,
+      row.dispatched_at,
+      row.resolved_at
+    ]),
+    [],
+    ["SOS Details"],
+    [
+      "sos_id",
+      "latest_status",
+      "emergency_category",
+      "assigned_unit",
+      "terminal_status",
+      "address",
+      "opened_at",
+      "resolved_at"
+    ],
+    ...details.sos.map((row) => [
+      row.sos_id,
+      row.latest_status,
+      row.emergency_category,
+      row.assigned_unit,
+      row.terminal_status,
+      row.address,
+      row.opened_at,
+      row.resolved_at
+    ])
   ];
 
   return `${toCsv(rows)}\n`;
@@ -496,7 +681,8 @@ router.get("/admin/reports/export.csv", requireAdminAuth, async (req, res) => {
 
     const analytics = await buildAnalytics({ range, timezone });
     const filenameTimestamp = analytics.generated_at.replace(/[:.]/g, "-");
-    const csv = buildCsvPayload(analytics);
+    const details = await getCsvDetails({ range, now: new Date(analytics.generated_at) });
+    const csv = buildCsvPayload(analytics, details);
 
     res.set("Content-Type", "text/csv; charset=utf-8");
     res.set(

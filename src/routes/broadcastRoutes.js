@@ -6,7 +6,7 @@ import { sendBroadcastPush } from "../services/fcm.js";
 
 const router = express.Router();
 
-const ALLOWED_SEVERITIES = ["info", "medium", "high", "critical"];
+const ALLOWED_SEVERITIES = ["announcement", "warning", "danger"];
 const ALLOWED_AUDIENCE_TYPES = ["all", "role"];
 const ALLOWED_APP_AUDIENCE_ROLES = new Set(["citizen", "student"]);
 

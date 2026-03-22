@@ -58,6 +58,12 @@ router.post("/devices/register", requireAppAuth, async (req, res) => {
 
     await client.query("COMMIT");
 
+    console.info("[devices] register.success", {
+      userId: Number(userId),
+      platform,
+      tokenPreview: `${token.slice(0, 8)}...${token.slice(-8)}`,
+    });
+
     return res.json({ ok: true });
   } catch (err) {
     try {
