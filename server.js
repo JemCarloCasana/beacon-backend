@@ -31,12 +31,13 @@ function parseAllowedOrigins() {
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+  const builtInOrigins = ["https://beacon-admin-five.vercel.app"];
 
   if (process.env.ADMIN_FRONTEND_URL) {
     configured.push(process.env.ADMIN_FRONTEND_URL.trim());
   }
 
-  return [...new Set(configured)];
+  return [...new Set([...builtInOrigins, ...configured])];
 }
 
 const allowedOrigins = parseAllowedOrigins();
