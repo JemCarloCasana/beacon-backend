@@ -40,6 +40,22 @@ function parseAllowedOrigins() {
 }
 
 const allowedOrigins = parseAllowedOrigins();
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn("CORS rejected origin:", origin);
+    return callback(new Error("Not allowed by CORS"));
+  },
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma"],
+  credentials: false,
+  optionsSuccessStatus: 204
+};
 const authRateLimit = createRateLimiter({
   windowMs: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS || 60_000),
   max: Number(process.env.AUTH_RATE_LIMIT_MAX || 15),
@@ -61,20 +77,8 @@ app.set("trust proxy", 1);
 app.use(morgan("dev"));
 
 // CORS
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error("Not allowed by CORS"));
-    },
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma"],
-    credentials: true
-  })
-);
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
 // JSON parser
 app.use(express.json({ limit: "2mb" }));
