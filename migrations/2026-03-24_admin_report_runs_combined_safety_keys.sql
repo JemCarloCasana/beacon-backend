@@ -1,5 +1,8 @@
 BEGIN;
 
+ALTER TABLE public.admin_report_runs
+  DROP CONSTRAINT IF EXISTS admin_report_runs_report_key_check;
+
 UPDATE public.admin_report_runs
 SET report_key = CASE report_key
   WHEN 'daily_incident_summary' THEN 'daily_safety_report'
@@ -14,9 +17,6 @@ WHERE report_key IN (
   'weekly_response_analysis',
   'monthly_sos_safety_report'
 );
-
-ALTER TABLE public.admin_report_runs
-  DROP CONSTRAINT IF EXISTS admin_report_runs_report_key_check;
 
 ALTER TABLE public.admin_report_runs
   ADD CONSTRAINT admin_report_runs_report_key_check
