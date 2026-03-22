@@ -19,6 +19,7 @@ import adminBroadcastRoutes from "./src/routes/adminBroadcastRoutes.js";
 import adminSosRoutes from "./src/routes/adminSosRoutes.js";
 import adminReportsRoutes from "./src/routes/adminReportsRoutes.js";
 import { pool } from "./src/db.js";
+import { runMigrations } from "./scripts/migrate.js";
 import { createRateLimiter } from "./src/middleware/rateLimit.js";
 import { getAuthMetricsSnapshot } from "./src/utils/authMetrics.js";
 import { getSosStreamMetrics } from "./src/services/sosLiveOps.js";
@@ -134,26 +135,37 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
-// Start server
 const PORT = Number(process.env.PORT || 3000);
-app.listen(PORT, () => {
-  console.log(`API running on http://localhost:${PORT}`);
-  (async () => {
-    try {
-      const dbIdentity = await pool.query(
-        "SELECT current_database() AS db_name, current_schema() AS schema_name"
-      );
-      const row = dbIdentity.rows?.[0] ?? {};
-      console.log("Startup diagnostics", {
-        port: PORT,
-        db_name: row.db_name ?? null,
-        schema_name: row.schema_name ?? null,
-      });
-    } catch (err) {
-      console.warn("Startup diagnostics unavailable", err?.message || err);
-    }
-  })();
-});
+
+async function startServer() {
+  try {
+    await runMigrations();
+
+    app.listen(PORT, () => {
+      console.log(`API running on http://localhost:${PORT}`);
+      (async () => {
+        try {
+          const dbIdentity = await pool.query(
+            "SELECT current_database() AS db_name, current_schema() AS schema_name"
+          );
+          const row = dbIdentity.rows?.[0] ?? {};
+          console.log("Startup diagnostics", {
+            port: PORT,
+            db_name: row.db_name ?? null,
+            schema_name: row.schema_name ?? null,
+          });
+        } catch (err) {
+          console.warn("Startup diagnostics unavailable", err?.message || err);
+        }
+      })();
+    });
+  } catch (err) {
+    console.error("Fatal startup error while running migrations:", err);
+    process.exit(1);
+  }
+}
+
+startServer();
 
 
 
