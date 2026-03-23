@@ -818,10 +818,16 @@ paths:
       responses:
         "200":
           description: Inbox
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AppBroadcastInboxItem"
 
   /admin/broadcasts/{id}/ack:
     post:
-      summary: Acknowledge broadcast delivery (presence check)
+      summary: Acknowledge broadcast delivery for the authenticated app user
       security:
         - bearerAuth: []
       parameters:
@@ -829,6 +835,10 @@ paths:
       responses:
         "200":
           description: Acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BroadcastAckResponse"
 
   /admin/sos/live-map:
     get:
@@ -1414,6 +1424,42 @@ components:
         For `audience_type=role`, send `audience_roles` as the primary field.
         `audience_role_ids` is accepted as a deprecated compatibility fallback.
         If both are provided, `audience_roles` takes precedence.
+
+    AppBroadcastInboxItem:
+      type: object
+      required: [id, title, body, delivered_at, acknowledged_at]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        body:
+          type: string
+        severity:
+          type: string
+          nullable: true
+        audience_type:
+          type: string
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+        acknowledged_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BroadcastAckResponse:
+      type: object
+      required: [ok, broadcast_id, acknowledged_at]
+      properties:
+        ok:
+          type: boolean
+        broadcast_id:
+          type: integer
+        acknowledged_at:
+          type: string
+          format: date-time
 
     CreateSosRequest:
       type: object

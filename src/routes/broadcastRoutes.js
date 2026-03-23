@@ -337,7 +337,7 @@ router.get("/admin/broadcasts/my/inbox", requireFirebaseAuth, async (req, res) =
 
     const result = await pool.query(
       `
-      SELECT b.*, d.delivered_at
+      SELECT b.*, d.delivered_at, d.acknowledged_at
       FROM broadcast_user_deliveries d
       JOIN broadcasts b ON b.id = d.broadcast_id
       WHERE d.user_id = $1
@@ -382,10 +382,10 @@ router.post("/admin/broadcasts/:id/ack", requireFirebaseAuth, async (req, res) =
 
     const result = await pool.query(
       `
-      SELECT 1
-      FROM broadcast_user_deliveries
+      UPDATE broadcast_user_deliveries
+      SET acknowledged_at = COALESCE(acknowledged_at, NOW())
       WHERE broadcast_id = $1 AND user_id = $2
-      LIMIT 1
+      RETURNING acknowledged_at
       `,
       [broadcastId, userId]
     );
@@ -394,7 +394,11 @@ router.post("/admin/broadcasts/:id/ack", requireFirebaseAuth, async (req, res) =
       return res.status(404).json({ message: "Delivery not found" });
     }
 
-    return res.json({ ok: true });
+    return res.json({
+      ok: true,
+      broadcast_id: broadcastId,
+      acknowledged_at: result.rows[0].acknowledged_at,
+    });
   } catch (err) {
     console.error("POST /admin/broadcasts/:id/ack error:", err);
     return res.status(500).json({ message: "Server error" });

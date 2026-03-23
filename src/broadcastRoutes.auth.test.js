@@ -58,6 +58,7 @@ test("GET /admin/broadcasts/my/inbox returns 200 for authenticated app user via 
           title: "Broadcast",
           body: "Test",
           delivered_at: "2026-02-27T04:00:00.000Z",
+          acknowledged_at: "2026-02-27T04:05:00.000Z",
         },
       ],
     };
@@ -73,9 +74,10 @@ test("GET /admin/broadcasts/my/inbox returns 200 for authenticated app user via 
   assert.equal(res.statusCode, 200);
   assert.equal(Array.isArray(res.body), true);
   assert.equal(res.body.length, 1);
+  assert.equal(res.body[0].acknowledged_at, "2026-02-27T04:05:00.000Z");
 });
 
-test("POST /admin/broadcasts/:id/ack returns 200 for authenticated app user with delivery", async (t) => {
+test("POST /admin/broadcasts/:id/ack persists acknowledgement and returns timestamp", async (t) => {
   const originalQuery = pool.query;
   t.after(() => {
     pool.query = originalQuery;
@@ -103,11 +105,11 @@ test("POST /admin/broadcasts/:id/ack returns 200 for authenticated app user with
       };
     }
 
-    assert.match(sql, /FROM broadcast_user_deliveries/i);
+    assert.match(sql, /UPDATE broadcast_user_deliveries/i);
     assert.deepEqual(params, [7, 100]);
     return {
       rowCount: 1,
-      rows: [{ "?column?": 1 }],
+      rows: [{ acknowledged_at: "2026-03-23T12:00:00.000Z" }],
     };
   };
 
@@ -119,7 +121,68 @@ test("POST /admin/broadcasts/:id/ack returns 200 for authenticated app user with
   await handler(req, res);
 
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body, { ok: true });
+  assert.deepEqual(res.body, {
+    ok: true,
+    broadcast_id: 7,
+    acknowledged_at: "2026-03-23T12:00:00.000Z",
+  });
+});
+
+test("POST /admin/broadcasts/:id/ack is idempotent and preserves existing acknowledged_at", async (t) => {
+  const originalQuery = pool.query;
+  t.after(() => {
+    pool.query = originalQuery;
+  });
+
+  const responses = [
+    { rowCount: 1, rows: [{ id: 100 }] },
+    { rowCount: 1, rows: [{ id: 7 }] },
+    { rowCount: 1, rows: [{ acknowledged_at: "2026-03-23T12:00:00.000Z" }] },
+    { rowCount: 1, rows: [{ id: 100 }] },
+    { rowCount: 1, rows: [{ id: 7 }] },
+    { rowCount: 1, rows: [{ acknowledged_at: "2026-03-23T12:00:00.000Z" }] },
+  ];
+  let call = 0;
+  pool.query = async (sql, params) => {
+    call += 1;
+    if (call === 1 || call === 4) {
+      assert.match(sql, /FROM users/i);
+      assert.deepEqual(params, ["firebase-uid-2"]);
+      return responses[call - 1];
+    }
+
+    if (call === 2 || call === 5) {
+      assert.match(sql, /FROM broadcasts/i);
+      assert.deepEqual(params, [7]);
+      return responses[call - 1];
+    }
+
+    assert.match(sql, /UPDATE broadcast_user_deliveries/i);
+    assert.deepEqual(params, [7, 100]);
+    return responses[call - 1];
+  };
+
+  const ackStack = getRoute("/admin/broadcasts/:id/ack", "post");
+  const handler = ackStack[ackStack.length - 1].handle;
+  const req = { auth: { uid: "firebase-uid-2" }, params: { id: "7" } };
+  const firstRes = createRes();
+  const secondRes = createRes();
+
+  await handler(req, firstRes);
+  await handler(req, secondRes);
+
+  assert.equal(firstRes.statusCode, 200);
+  assert.deepEqual(firstRes.body, {
+    ok: true,
+    broadcast_id: 7,
+    acknowledged_at: "2026-03-23T12:00:00.000Z",
+  });
+  assert.equal(secondRes.statusCode, 200);
+  assert.deepEqual(secondRes.body, {
+    ok: true,
+    broadcast_id: 7,
+    acknowledged_at: "2026-03-23T12:00:00.000Z",
+  });
 });
 
 test("GET /admin/broadcasts/my/inbox returns 401 without bearer token", async () => {
@@ -166,7 +229,7 @@ test("POST /admin/broadcasts/:id/ack blocks user when broadcast is not in inbox"
       };
     }
 
-    assert.match(sql, /FROM broadcast_user_deliveries/i);
+    assert.match(sql, /UPDATE broadcast_user_deliveries/i);
     assert.deepEqual(params, [9, 200]);
     return {
       rowCount: 0,
