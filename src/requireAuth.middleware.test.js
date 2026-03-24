@@ -20,6 +20,49 @@ function createRes() {
   };
 }
 
+function createAppAuthReq() {
+  return {
+    headers: { authorization: "Bearer valid-token" },
+    method: "GET",
+    ip: "127.0.0.1",
+    originalUrl: "/me",
+    url: "/me",
+  };
+}
+
+async function runRequireAppAuthWithDbStub(t, {
+  decoded,
+  onQuery,
+}) {
+  const originalPoolQuery = pool.query;
+  pool.query = onQuery;
+  setVerifyIdTokenForTests(async () => decoded);
+
+  t.after(() => {
+    pool.query = originalPoolQuery;
+    setVerifyIdTokenForTests(null);
+  });
+
+  const req = createAppAuthReq();
+  const res = createRes();
+  let nextCalled = false;
+  let nextResolved;
+  const nextPromise = new Promise((resolve) => {
+    nextResolved = resolve;
+  });
+
+  await requireAppAuth(req, res, () => {
+    nextCalled = true;
+    nextResolved();
+  });
+
+  await nextPromise;
+
+  assert.equal(nextCalled, true);
+  assert.equal(res.statusCode, 200);
+  assert.equal(req.auth.uid, decoded.uid);
+}
+
 test("requireAuth returns 401 for missing bearer token", async () => {
   const req = { headers: {}, method: "GET", ip: "127.0.0.1", url: "/me" };
   const res = createRes();
@@ -89,46 +132,110 @@ test("requireAuth returns 401 for expired token", async () => {
 });
 
 test("requireAppAuth bootstraps first-time user profile successfully", async (t) => {
-  const originalPoolQuery = pool.query;
   let dbUpsertCalled = false;
-  pool.query = async (text, values) => {
-    if (text.includes("INSERT INTO users (firebase_uid, full_name, email, beacon_code)")) {
-      dbUpsertCalled = true;
-      assert.equal(values[0], "uid-app-1");
-      assert.equal(values[1], "App User");
-      assert.equal(values[2], "app@example.com");
-      return { rowCount: 1, rows: [] };
+
+  await runRequireAppAuthWithDbStub(t, {
+    decoded: {
+      uid: "uid-app-1",
+      email: "app@example.com",
+      name: "App User",
+    },
+    onQuery: async (text, values) => {
+      if (text.includes("SELECT full_name FROM users WHERE firebase_uid = $1")) {
+        assert.deepEqual(values, ["uid-app-1"]);
+        return { rowCount: 0, rows: [] };
+      }
+      if (text.includes("INSERT INTO users (firebase_uid, full_name, email, beacon_code)")) {
+        dbUpsertCalled = true;
+        assert.equal(values[0], "uid-app-1");
+        assert.equal(values[1], "App User");
+        assert.equal(values[2], "app@example.com");
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected SQL in test: ${text}`);
     }
-    throw new Error(`Unexpected SQL in test: ${text}`);
-  };
-
-  setVerifyIdTokenForTests(async () => ({
-    uid: "uid-app-1",
-    email: "app@example.com",
-    name: "App User",
-  }));
-
-  t.after(() => {
-    pool.query = originalPoolQuery;
-    setVerifyIdTokenForTests(null);
   });
 
-  const req = {
-    headers: { authorization: "Bearer valid-token" },
-    method: "GET",
-    ip: "127.0.0.1",
-    originalUrl: "/me",
-    url: "/me",
-  };
-  const res = createRes();
-  let nextCalled = false;
-
-  await requireAppAuth(req, res, () => {
-    nextCalled = true;
-  });
-
-  assert.equal(nextCalled, true);
-  assert.equal(res.statusCode, 200);
   assert.equal(dbUpsertCalled, true);
-  assert.equal(req.auth.uid, "uid-app-1");
+});
+
+test("requireAppAuth falls back to email-derived name when token name is placeholder", async (t) => {
+  await runRequireAppAuthWithDbStub(t, {
+    decoded: {
+      uid: "uid-app-2",
+      email: "jane.doe@example.com",
+      name: "User 12345",
+    },
+    onQuery: async (text, values) => {
+      if (text.includes("SELECT full_name FROM users WHERE firebase_uid = $1")) {
+        return { rowCount: 0, rows: [] };
+      }
+      if (text.includes("INSERT INTO users (firebase_uid, full_name, email, beacon_code)")) {
+        assert.equal(values[1], "jane doe");
+        assert.equal(values[2], "jane.doe@example.com");
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    }
+  });
+});
+
+test("requireAppAuth preserves existing real name when token name is placeholder", async (t) => {
+  await runRequireAppAuthWithDbStub(t, {
+    decoded: {
+      uid: "uid-app-3",
+      email: "person@example.com",
+      name: "User 54321",
+    },
+    onQuery: async (text, values) => {
+      if (text.includes("SELECT full_name FROM users WHERE firebase_uid = $1")) {
+        return { rowCount: 1, rows: [{ full_name: "Real Person" }] };
+      }
+      if (text.includes("INSERT INTO users (firebase_uid, full_name, email, beacon_code)")) {
+        assert.equal(values[1], "Real Person");
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    }
+  });
+});
+
+test("requireAppAuth upgrades placeholder DB name when token name is valid", async (t) => {
+  await runRequireAppAuthWithDbStub(t, {
+    decoded: {
+      uid: "uid-app-4",
+      email: "person@example.com",
+      name: "Valid Person",
+    },
+    onQuery: async (text, values) => {
+      if (text.includes("SELECT full_name FROM users WHERE firebase_uid = $1")) {
+        return { rowCount: 1, rows: [{ full_name: "User 99887" }] };
+      }
+      if (text.includes("INSERT INTO users (firebase_uid, full_name, email, beacon_code)")) {
+        assert.equal(values[1], "Valid Person");
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    }
+  });
+});
+
+test("requireAppAuth upgrades placeholder DB name from email fallback when token name is invalid", async (t) => {
+  await runRequireAppAuthWithDbStub(t, {
+    decoded: {
+      uid: "uid-app-5",
+      email: "sam_smith@example.com",
+      name: "User 11111",
+    },
+    onQuery: async (text, values) => {
+      if (text.includes("SELECT full_name FROM users WHERE firebase_uid = $1")) {
+        return { rowCount: 1, rows: [{ full_name: "User 22222" }] };
+      }
+      if (text.includes("INSERT INTO users (firebase_uid, full_name, email, beacon_code)")) {
+        assert.equal(values[1], "sam smith");
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected SQL in test: ${text}`);
+    }
+  });
 });

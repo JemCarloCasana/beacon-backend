@@ -1,29 +1,16 @@
 import { pool } from "../db.js";
 import { requireAuth } from "./requireAuth.js";
+import { chooseBootstrapFullName } from "../utils/userNameFallbacks.js";
 
-function sanitizeName(name) {
-  if (typeof name !== "string") return null;
-  const normalized = name.trim().replace(/\s+/g, " ");
-  if (!normalized) return null;
-  return normalized.slice(0, 50);
-}
-
-function deriveNameFromEmail(email) {
-  if (typeof email !== "string" || !email.includes("@")) return "Beacon User";
-  const local = email.split("@")[0];
-  const normalized = local
-    .replace(/[._-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) return "Beacon User";
-  return normalized.slice(0, 50);
-}
-
-function buildBootstrapProfile(decoded) {
+function buildBootstrapProfile(decoded, existingName = null) {
   const email = typeof decoded.email === "string" && decoded.email.trim()
     ? decoded.email.trim().toLowerCase().slice(0, 320)
     : `${decoded.uid}@firebase.local`;
-  const fullName = sanitizeName(decoded.name) || deriveNameFromEmail(email);
+  const fullName = chooseBootstrapFullName({
+    tokenName: decoded.name,
+    existingName,
+    email,
+  });
 
   return { email, fullName };
 }
@@ -38,11 +25,18 @@ function generateBeaconCode() {
 }
 
 async function upsertUserFromToken(decoded) {
-  const { email, fullName } = buildBootstrapProfile(decoded);
-
   for (let i = 0; i < 10; i += 1) {
     const beaconCode = generateBeaconCode();
     try {
+      const existingResult = await pool.query(
+        "SELECT full_name FROM users WHERE firebase_uid = $1",
+        [decoded.uid]
+      );
+      const existingName = existingResult.rowCount > 0
+        ? existingResult.rows[0].full_name
+        : null;
+      const { email, fullName } = buildBootstrapProfile(decoded, existingName);
+
       await pool.query(
         `
         INSERT INTO users (firebase_uid, full_name, email, beacon_code)
@@ -50,6 +44,7 @@ async function upsertUserFromToken(decoded) {
         ON CONFLICT (firebase_uid)
         DO UPDATE SET
           email = EXCLUDED.email,
+          full_name = EXCLUDED.full_name,
           updated_at = NOW(),
           beacon_code = COALESCE(users.beacon_code, EXCLUDED.beacon_code)
         `,
