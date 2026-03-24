@@ -14,6 +14,16 @@ const router = express.Router();
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 if (!JWT_SECRET) throw new Error("Missing ADMIN_JWT_SECRET in .env");
 
+function logAdminLoginDebug({ submittedEmail, adminFound, hashPrefix, status, compareResult }) {
+  console.debug("[admin-auth] login-debug", {
+    submittedEmail,
+    adminFound,
+    hashPrefix,
+    status,
+    compareResult
+  });
+}
+
 async function getRoleIdByName(roleName) {
   const r = await pool.query("SELECT id FROM roles WHERE name = $1", [roleName]);
   return r.rowCount ? r.rows[0].id : null;
@@ -88,10 +98,36 @@ router.post("/admin/auth/login", async (req, res) => {
       [normalized.email]
     );
 
-    if (result.rowCount === 0) return res.status(401).json({ message: "Invalid credentials" });
+    if (result.rowCount === 0) {
+      logAdminLoginDebug({
+        submittedEmail: normalized.email,
+        adminFound: false,
+        hashPrefix: null,
+        status: null,
+        compareResult: null
+      });
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
 
     const row = result.rows[0];
+    const hashPrefix = typeof row.password_hash === "string" ? row.password_hash.slice(0, 10) : null;
+    logAdminLoginDebug({
+      submittedEmail: normalized.email,
+      adminFound: true,
+      hashPrefix,
+      status: row.status,
+      compareResult: null
+    });
+
     const ok = await bcrypt.compare(normalized.password, row.password_hash);
+    logAdminLoginDebug({
+      submittedEmail: normalized.email,
+      adminFound: true,
+      hashPrefix,
+      status: row.status,
+      compareResult: ok
+    });
+
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
     const activeCheck = assertAccountActive(row);
     if (!activeCheck.ok) {
