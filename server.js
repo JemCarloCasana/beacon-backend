@@ -19,6 +19,7 @@ import adminBroadcastRoutes from "./src/routes/adminBroadcastRoutes.js";
 import adminSosRoutes from "./src/routes/adminSosRoutes.js";
 import adminReportsRoutes from "./src/routes/adminReportsRoutes.js";
 import { pool } from "./src/db.js";
+import { connectMongo, disconnectMongo, isMongoConnected } from "./src/mongo.js";
 import { runMigrations } from "./scripts/migrate.js";
 import { createRateLimiter } from "./src/middleware/rateLimit.js";
 import { getAuthMetricsSnapshot } from "./src/utils/authMetrics.js";
@@ -92,9 +93,16 @@ app.get("/health/db", async (req, res) => {
     await pool.query("SELECT 1");
     res.json({ ok: true });
   } catch (err) {
-    console.error("Database health check failed:", err?.message || err);
-    res.status(503).json({ ok: false, error: err?.message || String(err) });
+    console.error("Database health check failed");
+    res.status(503).json({ ok: false });
   }
+});
+
+app.get("/health/mongo", (req, res) => {
+  if (isMongoConnected()) {
+    return res.json({ ok: true });
+  }
+  return res.status(503).json({ ok: false });
 });
 
 app.get("/health/auth-metrics", (req, res) => {
@@ -146,6 +154,13 @@ async function startServer() {
   try {
     await runMigrations();
 
+    if (process.env.MONGODB_URI) {
+      await connectMongo();
+      console.log("MongoDB connected");
+    } else {
+      console.warn("MONGODB_URI is not set - MongoDB checks will report unavailable until configured");
+    }
+
     app.listen(PORT, () => {
       console.log(`API running on http://localhost:${PORT}`);
       (async () => {
@@ -165,10 +180,26 @@ async function startServer() {
       })();
     });
   } catch (err) {
-    console.error("Fatal startup error while running migrations:", err);
+    console.error("Fatal startup error:", err);
     process.exit(1);
   }
 }
+
+process.once("SIGTERM", async () => {
+  try {
+    await disconnectMongo();
+  } catch {
+    // shutdown continues even if Mongo disconnect reports an issue
+  }
+});
+
+process.once("SIGINT", async () => {
+  try {
+    await disconnectMongo();
+  } catch {
+    // shutdown continues even if Mongo disconnect reports an issue
+  }
+});
 
 startServer();
 
