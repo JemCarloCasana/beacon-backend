@@ -26,12 +26,22 @@ pool.on("connect", () => {
 });
 
 // Graceful shutdown handlers
-process.on("SIGTERM", async () => {
-  console.log("SIGTERM received, closing database pool...");
-  await pool.end();
-});
+let isShuttingDown = false;
 
-process.on("SIGINT", async () => {
-  console.log("SIGINT received, closing database pool...");
-  await pool.end();
-});
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`${signal} received, closing database pool...`);
+  try {
+    if (!pool.ending && !pool.ended) {
+      await pool.end();
+    }
+  } catch (err) {
+    if (!err.message?.includes("Called end on pool more than once")) {
+      console.error("Error closing database pool:", err.message || err);
+    }
+  }
+}
+
+process.once("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.once("SIGINT", () => gracefulShutdown("SIGINT"));
