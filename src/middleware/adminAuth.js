@@ -1,6 +1,7 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import { pool } from "../db.js";
+import { auditLog } from "../utils/auditLog.js";
 
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 
@@ -87,6 +88,13 @@ export function requirePermission(permission) {
       const permissions = await getAdminPermissions(req.admin.adminId);
       
       if (!permissions.includes(permission)) {
+        auditLog({
+          action: "auth.forbidden",
+          actor: req.admin.adminId,
+          target: `${req.method} ${req.path}`,
+          outcome: "denied",
+          details: { permission },
+        });
         return res.status(403).json({ message: "Insufficient permissions" });
       }
 

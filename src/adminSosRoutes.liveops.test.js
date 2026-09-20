@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import router from "./routes/adminSosRoutes.js";
 import { pool } from "./db.js";
 import { setUserNotificationMulticastSenderForTests } from "./services/userNotifications.js";
+import { UserNotification } from "./models/UserNotification.js";
+import { Counter } from "./models/Counter.js";
 
 function getRoute(path, method) {
   const layer = router.stack.find(
@@ -194,9 +196,18 @@ test("POST /admin/sos/:sosId/acknowledge returns 400 when note exceeds max lengt
 test("POST /admin/sos/:sosId/acknowledge persists assigned_unit and returns alias fields", async (t) => {
   const originalConnect = pool.connect;
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   t.after(() => {
     pool.connect = originalConnect;
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
+  });
+
+  Counter.nextPublicId = async () => 906;
+  UserNotification.create = async (doc) => ({
+    toObject: () => ({ public_id: 906, is_read: false, ...doc }),
   });
 
   const queries = [];
@@ -296,9 +307,18 @@ test("POST /admin/sos/:sosId/acknowledge persists assigned_unit and returns alia
 test("POST /admin/sos/:sosId/acknowledge on already-acknowledged thread refreshes assignment and appends event", async (t) => {
   const originalConnect = pool.connect;
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   t.after(() => {
     pool.connect = originalConnect;
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
+  });
+
+  Counter.nextPublicId = async () => 907;
+  UserNotification.create = async (doc) => ({
+    toObject: () => ({ public_id: 907, is_read: false, ...doc }),
   });
 
   const queries = [];
@@ -389,11 +409,33 @@ test("POST /admin/sos/:sosId/acknowledge on already-acknowledged thread refreshe
 test("POST /admin/sos/:sosId/resolve stores SAFE terminal state and notifies owner and friends", async (t) => {
   const originalConnect = pool.connect;
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   t.after(() => {
     pool.connect = originalConnect;
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
     setUserNotificationMulticastSenderForTests(null);
   });
+
+  const createdDocs = [];
+  Counter.nextPublicId = async () => 102;
+  UserNotification.create = async (doc) => {
+    createdDocs.push(doc);
+    return {
+      toObject: () => ({
+        public_id: 102,
+        recipient_user_id: 42,
+        type: "sos_update",
+        title: "SOS Update",
+        message: "Your SOS has been marked safe.",
+        metadata: { sos_id: 5, status: "safe", fallback_route: "/sos/5" },
+        is_read: false,
+        created_at: "2026-03-19T01:10:01.000Z",
+      }),
+    };
+  };
 
   const clientQueries = [];
   const sentMessages = [];
@@ -466,21 +508,7 @@ test("POST /admin/sos/:sosId/resolve stores SAFE terminal state and notifies own
       };
     }
     if (/INSERT INTO user_notifications/i.test(text)) {
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            id: 102,
-            recipient_user_id: 42,
-            type: "sos_update",
-            title: "SOS Update",
-            message: "Your SOS has been marked safe.",
-            metadata: { sos_id: 5, status: "safe", fallback_route: "/sos/5" },
-            is_read: false,
-            created_at: "2026-03-19T01:10:01.000Z"
-          }
-        ]
-      };
+      throw new Error("user_notifications must be persisted to MongoDB, not PostgreSQL");
     }
     if (/FROM friendships/i.test(text)) {
       assert.equal(params[0], 42);
@@ -545,17 +573,32 @@ test("POST /admin/sos/:sosId/resolve stores SAFE terminal state and notifies own
     true
   );
   assert.equal(sentMessages.length, 2);
-  assert.equal(sentMessages[0].data.sos_id, "5");
-  assert.equal(sentMessages[1].data.terminal_outcome, "safe");
-  assert.equal(sentMessages[1].data.sender_user_id, "42");
+  const ownerPush = sentMessages.find((message) => message.data.terminal_outcome == null);
+  const friendPush = sentMessages.find((message) => message.data.terminal_outcome === "safe");
+  assert.ok(ownerPush);
+  assert.equal(ownerPush.data.sos_id, "5");
+  assert.ok(friendPush);
+  assert.equal(friendPush.data.sender_user_id, "42");
+  assert.equal(createdDocs.length, 1);
+  assert.equal(createdDocs[0].recipient_user_id, 42);
+  assert.equal(createdDocs[0].type, "sos_update");
 });
 
 test("POST /admin/sos/:sosId/resolve stores CANCELLED terminal state", async (t) => {
   const originalConnect = pool.connect;
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   t.after(() => {
     pool.connect = originalConnect;
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
+  });
+
+  Counter.nextPublicId = async () => 904;
+  UserNotification.create = async (doc) => ({
+    toObject: () => ({ public_id: 904, is_read: false, ...doc }),
   });
 
   const clientQueries = [];
@@ -655,9 +698,18 @@ test("POST /admin/sos/:sosId/resolve stores CANCELLED terminal state", async (t)
 test("POST /admin/sos/:sosId/resolve keeps fallback resolved event without terminal status", async (t) => {
   const originalConnect = pool.connect;
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   t.after(() => {
     pool.connect = originalConnect;
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
+  });
+
+  Counter.nextPublicId = async () => 905;
+  UserNotification.create = async (doc) => ({
+    toObject: () => ({ public_id: 905, is_read: false, ...doc }),
   });
 
   const clientQueries = [];

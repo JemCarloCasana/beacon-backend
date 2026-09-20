@@ -4,6 +4,8 @@ import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import { requireAdminAuth } from "../middleware/adminAuth.js";
 import { notifyUserLifecycleEvent } from "../services/userNotifications.js";
+import { AdminNotification } from "../models/AdminNotification.js";
+import { Counter } from "../models/Counter.js";
 
 const router = express.Router();
 const MAX_IMAGES_PER_INCIDENT = 5;
@@ -40,37 +42,48 @@ async function notifyAdminsAboutIncident({ incidentId, incidentType }) {
       : "incident";
   const message = `A new ${safeIncidentType} incident was reported.`;
 
-  const insertResult = await pool.query(
+  const adminsResult = await pool.query(
     `
-    INSERT INTO notifications (
-      recipient_admin_id, type, title, message, metadata, is_read, created_at
-    )
-    SELECT
-      a.id,
-      'incident',
-      $1,
-      $2,
-      jsonb_build_object(
-        'reference_id',
-        $3::bigint,
-        'incident_id',
-        $3::bigint,
-        'fallback_route',
-        '/admin/incidents/' || $3::text
-      ),
-      false,
-      NOW()
-    FROM admins a
-    WHERE a.status = 'active'
-    `,
-    [title, message, Number(incidentId)]
+    SELECT id
+    FROM admins
+    WHERE status = 'active'
+    `
   );
+  const adminIds = adminsResult.rows
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (adminIds.length === 0) {
+    console.warn("[incident-routes] No active admin recipients for incident notification", {
+      incidentId: Number(incidentId)
+    });
+    return;
+  }
+
+  const docs = [];
+  for (const recipientAdminId of adminIds) {
+    docs.push({
+      public_id: await Counter.nextPublicId("notifications"),
+      recipient_admin_id: recipientAdminId,
+      type: "incident",
+      title,
+      message,
+      metadata: {
+        reference_id: Number(incidentId),
+        incident_id: Number(incidentId),
+        fallback_route: `/admin/incidents/${Number(incidentId)}`,
+      },
+      is_read: false,
+      created_at: new Date(),
+    });
+  }
+  const insertedDocs = await AdminNotification.insertMany(docs, { ordered: false });
+  const recipientCount = Array.isArray(insertedDocs) ? insertedDocs.length : 0;
   logDebug("notifications.insert", {
     incidentId: Number(incidentId),
     incidentType: safeIncidentType,
-    recipientCount: insertResult.rowCount ?? 0
+    recipientCount
   });
-  if ((insertResult.rowCount ?? 0) === 0) {
+  if (recipientCount === 0) {
     console.warn("[incident-routes] No active admin recipients for incident notification", {
       incidentId: Number(incidentId)
     });

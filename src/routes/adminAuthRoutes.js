@@ -9,16 +9,35 @@ import {
   validateLoginPayload,
   validateSignupPayload
 } from "../utils/adminAuthValidation.js";
+import { auditLog } from "../utils/auditLog.js";
 
 const router = express.Router();
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 if (!JWT_SECRET) throw new Error("Missing ADMIN_JWT_SECRET in .env");
 
-function logAdminLoginDebug({ submittedEmail, adminFound, hashPrefix, status, compareResult }) {
+const DEFAULT_ADMIN_JWT_TTL = "7d";
+
+export function resolveAdminJwtTtl() {
+  const allowTestTtl = String(process.env.ALLOW_TEST_JWT_TTL || "").toLowerCase() === "true";
+  const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+  if (allowTestTtl && !isProduction) {
+    const testTtl = String(process.env.ADMIN_JWT_TEST_TTL || "").trim();
+    if (testTtl) {
+      return { ttl: testTtl, testHook: true };
+    }
+  }
+  return { ttl: DEFAULT_ADMIN_JWT_TTL, testHook: false };
+}
+
+const jwtTtl = resolveAdminJwtTtl();
+if (jwtTtl.testHook) {
+  console.warn(`[admin-auth] TEST JWT TTL enabled: expiresIn=${jwtTtl.ttl} (never enable in production)`);
+}
+
+function logAdminLoginDebug({ submittedEmail, adminFound, status, compareResult }) {
   console.debug("[admin-auth] login-debug", {
     submittedEmail,
     adminFound,
-    hashPrefix,
     status,
     compareResult
   });
@@ -41,7 +60,10 @@ router.post("/admin/auth/signup", async (req, res) => {
     if (!roleId) return res.status(500).json({ message: "Role configuration missing in DB" });
 
     const existing = await pool.query("SELECT id FROM admins WHERE lower(email) = $1", [normalized.email]);
-    if (existing.rowCount > 0) return res.status(409).json({ message: "Email already registered" });
+    if (existing.rowCount > 0) {
+      auditLog({ action: "admin.signup", actor: null, target: normalized.email, outcome: "duplicate_email" });
+      return res.status(409).json({ message: "Email already registered" });
+    }
 
     const password_hash = await bcrypt.hash(normalized.password, 12);
 
@@ -59,8 +81,10 @@ router.post("/admin/auth/signup", async (req, res) => {
     const token = jwt.sign(
       { sub: String(admin.id), adminId: admin.id, role: SIGNUP_ROLE, roleId: admin.role_id },
       JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: jwtTtl.ttl }
     );
+
+    auditLog({ action: "admin.signup", actor: admin.id, target: admin.email, outcome: "created" });
 
     return res.status(201).json({
       token,
@@ -73,10 +97,11 @@ router.post("/admin/auth/signup", async (req, res) => {
         permissions
       }
     });
-  } catch (e) {
-    if (e?.code === "23505") {
-      return res.status(409).json({ message: "Email already registered" });
-    }
+    } catch (e) {
+      if (e?.code === "23505") {
+        auditLog({ action: "admin.signup", actor: null, target: normalized.email, outcome: "duplicate_email" });
+        return res.status(409).json({ message: "Email already registered" });
+      }
     console.error(e);
     return res.status(500).json({ message: "Server error" });
   }
@@ -102,19 +127,17 @@ router.post("/admin/auth/login", async (req, res) => {
       logAdminLoginDebug({
         submittedEmail: normalized.email,
         adminFound: false,
-        hashPrefix: null,
         status: null,
         compareResult: null
       });
+      auditLog({ action: "admin.login", actor: null, target: normalized.email, outcome: "invalid_credentials" });
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
     const row = result.rows[0];
-    const hashPrefix = typeof row.password_hash === "string" ? row.password_hash.slice(0, 10) : null;
     logAdminLoginDebug({
       submittedEmail: normalized.email,
       adminFound: true,
-      hashPrefix,
       status: row.status,
       compareResult: null
     });
@@ -123,12 +146,14 @@ router.post("/admin/auth/login", async (req, res) => {
     logAdminLoginDebug({
       submittedEmail: normalized.email,
       adminFound: true,
-      hashPrefix,
       status: row.status,
       compareResult: ok
     });
 
-    if (!ok) return res.status(401).json({ message: "Invalid credentials" });
+    if (!ok) {
+      auditLog({ action: "admin.login", actor: row.id, target: normalized.email, outcome: "invalid_credentials" });
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
     const activeCheck = assertAccountActive(row);
     if (!activeCheck.ok) {
       return res.status(activeCheck.statusCode).json({ message: activeCheck.message });
@@ -138,8 +163,10 @@ router.post("/admin/auth/login", async (req, res) => {
     const token = jwt.sign(
       { sub: String(row.id), adminId: row.id, role: row.role, roleId: row.role_id },
       JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: jwtTtl.ttl }
     );
+
+    auditLog({ action: "admin.login", actor: row.id, target: row.email, outcome: "success" });
 
     return res.json({
       token,

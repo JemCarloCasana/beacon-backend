@@ -3,6 +3,8 @@ import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import admin from "../firebaseAdmin.js";
 import { publishSosDeltaBySosId } from "../services/sosLiveOps.js";
+import { AdminNotification } from "../models/AdminNotification.js";
+import { Counter } from "../models/Counter.js";
 
 const router = express.Router();
 const SOS_CATEGORIES = new Set(["medical", "fire", "violence", "unknown"]);
@@ -22,37 +24,48 @@ async function notifyAdminsAboutSos({ sosId, fullName, category }) {
   const senderName = typeof fullName === "string" && fullName.trim() ? fullName.trim() : "Unknown";
   const alertMessage = `${senderName} created an SOS (${category}).`;
 
-  const insertResult = await pool.query(
+  const adminsResult = await pool.query(
     `
-    INSERT INTO notifications (
-      recipient_admin_id, type, title, message, metadata, is_read, created_at
-    )
-    SELECT
-      a.id,
-      'sos',
-      $1,
-      $2,
-      jsonb_build_object(
-        'reference_id',
-        $3::bigint,
-        'sos_id',
-        $3::bigint,
-        'fallback_route',
-        '/admin/sos/' || $3::text
-      ),
-      false,
-      NOW()
-    FROM admins a
-    WHERE a.status = 'active'
-    `,
-    [alertTitle, alertMessage, Number(sosId)]
+    SELECT id
+    FROM admins
+    WHERE status = 'active'
+    `
   );
+  const adminIds = adminsResult.rows
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (adminIds.length === 0) {
+    console.warn("[sos-routes] No active admin recipients for SOS notification", {
+      sosId: Number(sosId)
+    });
+    return;
+  }
+
+  const docs = [];
+  for (const recipientAdminId of adminIds) {
+    docs.push({
+      public_id: await Counter.nextPublicId("notifications"),
+      recipient_admin_id: recipientAdminId,
+      type: "sos",
+      title: alertTitle,
+      message: alertMessage,
+      metadata: {
+        reference_id: Number(sosId),
+        sos_id: Number(sosId),
+        fallback_route: `/admin/sos/${Number(sosId)}`,
+      },
+      is_read: false,
+      created_at: new Date(),
+    });
+  }
+  const insertedDocs = await AdminNotification.insertMany(docs, { ordered: false });
+  const recipientCount = Array.isArray(insertedDocs) ? insertedDocs.length : 0;
   logDebug("notifications.insert", {
     sosId: Number(sosId),
     category,
-    recipientCount: insertResult.rowCount ?? 0
+    recipientCount
   });
-  if ((insertResult.rowCount ?? 0) === 0) {
+  if (recipientCount === 0) {
     console.warn("[sos-routes] No active admin recipients for SOS notification", {
       sosId: Number(sosId)
     });

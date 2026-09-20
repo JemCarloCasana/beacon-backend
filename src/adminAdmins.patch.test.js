@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import router from "./routes/adminAdminsRoutes.js";
 import { pool } from "./db.js";
+import { AdminNotification } from "./models/AdminNotification.js";
+import { Counter } from "./models/Counter.js";
 
 function findRouteLayer(path, method) {
   const layer = router.stack.find(
@@ -497,26 +499,31 @@ test("DELETE /admin/admins/:id is disabled", async () => {
 });
 
 test("GET /admin/notifications preserves admin_request type", async (t) => {
-  const originalQuery = pool.query;
+  const originalFind = AdminNotification.find;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminNotification.find = originalFind;
   });
 
-  pool.query = async () => ({
-    rowCount: 1,
-    rows: [
-      {
-        id: 71,
-        recipient_admin_id: 55,
-        type: "admin_request",
-        title: "Admin Access Request",
-        message: "You have received an admin access request.",
-        metadata: { admin_request_id: 101, requested_by_admin_id: 9 },
-        is_read: false,
-        created_at: "2026-03-07T01:00:00.000Z",
-      },
-    ],
-  });
+  let capturedFilter = null;
+  AdminNotification.find = (filter) => {
+    capturedFilter = filter;
+    return {
+      sort: () => ({
+        lean: async () => [
+          {
+            public_id: 71,
+            recipient_admin_id: 55,
+            type: "admin_request",
+            title: "Admin Access Request",
+            message: "You have received an admin access request.",
+            metadata: { admin_request_id: 101, requested_by_admin_id: 9 },
+            is_read: false,
+            created_at: "2026-03-07T01:00:00.000Z",
+          },
+        ],
+      }),
+    };
+  };
 
   const req = { admin: { adminId: 55 } };
   const res = createRes();
@@ -524,7 +531,9 @@ test("GET /admin/notifications preserves admin_request type", async (t) => {
   await getNotificationsHandler(req, res);
 
   assert.equal(res.statusCode, 200);
+  assert.deepEqual(capturedFilter, { recipient_admin_id: 55 });
   assert.equal(res.body.length, 1);
+  assert.equal(res.body[0].id, 71);
   assert.equal(res.body[0].type, "admin_request");
   assert.equal(res.body[0].metadata.admin_request_id, 101);
   assert.equal(res.get("cache-control"), "no-store, private, max-age=0");
@@ -533,15 +542,20 @@ test("GET /admin/notifications preserves admin_request type", async (t) => {
 });
 
 test("GET /admin/notifications returns [] for non-recipient admin", async (t) => {
-  const originalQuery = pool.query;
+  const originalFind = AdminNotification.find;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminNotification.find = originalFind;
   });
 
-  pool.query = async () => ({
-    rowCount: 0,
-    rows: [],
-  });
+  let capturedFilter = null;
+  AdminNotification.find = (filter) => {
+    capturedFilter = filter;
+    return {
+      sort: () => ({
+        lean: async () => [],
+      }),
+    };
+  };
 
   const req = { admin: { adminId: 999 } };
   const res = createRes();
@@ -549,29 +563,31 @@ test("GET /admin/notifications returns [] for non-recipient admin", async (t) =>
   await getNotificationsHandler(req, res);
 
   assert.equal(res.statusCode, 200);
+  assert.deepEqual(capturedFilter, { recipient_admin_id: 999 });
   assert.deepEqual(res.body, []);
 });
 
 test("GET /admin/notifications normalizes legacy string metadata admin_request_id", async (t) => {
-  const originalQuery = pool.query;
+  const originalFind = AdminNotification.find;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminNotification.find = originalFind;
   });
 
-  pool.query = async () => ({
-    rowCount: 1,
-    rows: [
-      {
-        id: 72,
-        recipient_admin_id: 55,
-        type: "admin_request",
-        title: "Admin Access Request",
-        message: "You have received an admin access request.",
-        metadata: { admin_request_id: "101", requested_by_admin_id: 9 },
-        is_read: false,
-        created_at: "2026-03-07T01:01:00.000Z",
-      },
-    ],
+  AdminNotification.find = () => ({
+    sort: () => ({
+      lean: async () => [
+        {
+          public_id: 72,
+          recipient_admin_id: 55,
+          type: "admin_request",
+          title: "Admin Access Request",
+          message: "You have received an admin access request.",
+          metadata: { admin_request_id: "101", requested_by_admin_id: 9 },
+          is_read: false,
+          created_at: "2026-03-07T01:01:00.000Z",
+        },
+      ],
+    }),
   });
 
   const req = { admin: { adminId: 55 } };
@@ -586,25 +602,26 @@ test("GET /admin/notifications normalizes legacy string metadata admin_request_i
 });
 
 test("GET /admin/notifications adds incident fallback_route from legacy metadata ids", async (t) => {
-  const originalQuery = pool.query;
+  const originalFind = AdminNotification.find;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminNotification.find = originalFind;
   });
 
-  pool.query = async () => ({
-    rowCount: 1,
-    rows: [
-      {
-        id: 73,
-        recipient_admin_id: 55,
-        type: "incident",
-        title: "New Incident Report",
-        message: "A new fire incident was reported.",
-        metadata: { incident_id: "222", reference_id: "222" },
-        is_read: false,
-        created_at: "2026-03-07T01:02:00.000Z",
-      },
-    ],
+  AdminNotification.find = () => ({
+    sort: () => ({
+      lean: async () => [
+        {
+          public_id: 73,
+          recipient_admin_id: 55,
+          type: "incident",
+          title: "New Incident Report",
+          message: "A new fire incident was reported.",
+          metadata: { incident_id: "222", reference_id: "222" },
+          is_read: false,
+          created_at: "2026-03-07T01:02:00.000Z",
+        },
+      ],
+    }),
   });
 
   const req = { admin: { adminId: 55 } };
@@ -620,25 +637,26 @@ test("GET /admin/notifications adds incident fallback_route from legacy metadata
 });
 
 test("GET /admin/notifications adds sos fallback_route from legacy metadata ids", async (t) => {
-  const originalQuery = pool.query;
+  const originalFind = AdminNotification.find;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminNotification.find = originalFind;
   });
 
-  pool.query = async () => ({
-    rowCount: 1,
-    rows: [
-      {
-        id: 74,
-        recipient_admin_id: 55,
-        type: "sos",
-        title: "New SOS Alert",
-        message: "A new SOS was created.",
-        metadata: { sos_id: "333", reference_id: "333" },
-        is_read: false,
-        created_at: "2026-03-07T01:03:00.000Z",
-      },
-    ],
+  AdminNotification.find = () => ({
+    sort: () => ({
+      lean: async () => [
+        {
+          public_id: 74,
+          recipient_admin_id: 55,
+          type: "sos",
+          title: "New SOS Alert",
+          message: "A new SOS was created.",
+          metadata: { sos_id: "333", reference_id: "333" },
+          is_read: false,
+          created_at: "2026-03-07T01:03:00.000Z",
+        },
+      ],
+    }),
   });
 
   const req = { admin: { adminId: 55 } };
@@ -655,11 +673,23 @@ test("GET /admin/notifications adds sos fallback_route from legacy metadata ids"
 
 test("POST /admin/admin-requests inserts notification metadata with admin_request_id", async (t) => {
   const originalConnect = pool.connect;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = AdminNotification.create;
   t.after(() => {
     pool.connect = originalConnect;
+    Counter.nextPublicId = originalNextPublicId;
+    AdminNotification.create = originalCreate;
   });
 
-  let capturedNotificationValues = null;
+  let capturedNotificationDoc = null;
+  Counter.nextPublicId = async (key) => {
+    assert.equal(key, "notifications");
+    return 998;
+  };
+  AdminNotification.create = async (doc) => {
+    capturedNotificationDoc = doc;
+    return { public_id: 998, ...doc };
+  };
   const client = {
     query: async (sql, values = []) => {
       const compactSql = String(sql).replace(/\s+/g, " ").trim();
@@ -684,10 +714,6 @@ test("POST /admin/admin-requests inserts notification metadata with admin_reques
           ],
         };
       }
-      if (compactSql.includes("INSERT INTO notifications")) {
-        capturedNotificationValues = values;
-        return { rowCount: 1, rows: [{ id: 998 }] };
-      }
       if (compactSql === "COMMIT") {
         return { rowCount: null, rows: [] };
       }
@@ -710,24 +736,36 @@ test("POST /admin/admin-requests inserts notification metadata with admin_reques
   await postAdminRequestHandler(req, res);
 
   assert.equal(res.statusCode, 201);
-  assert.ok(Array.isArray(capturedNotificationValues));
-  assert.equal(capturedNotificationValues[0], 55);
-  assert.notEqual(capturedNotificationValues[0], 9);
-  assert.equal(capturedNotificationValues[1], "admin_request");
+  assert.ok(capturedNotificationDoc);
+  assert.equal(capturedNotificationDoc.public_id, 998);
+  assert.equal(capturedNotificationDoc.recipient_admin_id, 55);
+  assert.notEqual(capturedNotificationDoc.recipient_admin_id, 9);
+  assert.equal(capturedNotificationDoc.type, "admin_request");
 
-  const metadata = JSON.parse(capturedNotificationValues[4]);
-  assert.equal(metadata.admin_request_id, 777);
-  assert.equal(metadata.requested_by_admin_id, 9);
+  assert.equal(capturedNotificationDoc.metadata.admin_request_id, 777);
+  assert.equal(capturedNotificationDoc.metadata.requested_by_admin_id, 9);
 });
 
-test("POST /admin/admin-requests rolls back when notification insert fails", async (t) => {
+test("POST /admin/admin-requests commits request when notification creation fails", async (t) => {
   const originalConnect = pool.connect;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = AdminNotification.create;
+  const originalError = console.error;
   t.after(() => {
     pool.connect = originalConnect;
+    Counter.nextPublicId = originalNextPublicId;
+    AdminNotification.create = originalCreate;
+    console.error = originalError;
   });
+  console.error = () => {};
 
   let rollbackCalled = false;
   let commitCalled = false;
+
+  Counter.nextPublicId = async () => 999;
+  AdminNotification.create = async () => {
+    throw new Error("notification creation failed");
+  };
 
   const client = {
     query: async (sql) => {
@@ -753,9 +791,6 @@ test("POST /admin/admin-requests rolls back when notification insert fails", asy
           ],
         };
       }
-      if (compactSql.includes("INSERT INTO notifications")) {
-        throw new Error("notification insert failed");
-      }
       if (compactSql === "ROLLBACK") {
         rollbackCalled = true;
         return { rowCount: null, rows: [] };
@@ -779,35 +814,35 @@ test("POST /admin/admin-requests rolls back when notification insert fails", asy
 
   await postAdminRequestHandler(req, res);
 
-  assert.equal(res.statusCode, 500);
-  assert.deepEqual(res.body, { message: "Server error" });
-  assert.equal(rollbackCalled, true);
-  assert.equal(commitCalled, false);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.message, "Admin request sent");
+  assert.equal(res.body.request.id, 778);
+  assert.equal(commitCalled, true);
+  assert.equal(rollbackCalled, false);
 });
 
 test("PATCH /admin/notifications/:id/read scopes update to recipient admin", async (t) => {
-  const originalQuery = pool.query;
+  const originalFindOneAndUpdate = AdminNotification.findOneAndUpdate;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminNotification.findOneAndUpdate = originalFindOneAndUpdate;
   });
 
-  let capturedValues = null;
-  pool.query = async (_sql, values) => {
-    capturedValues = values;
+  let capturedFilter = null;
+  let capturedUpdate = null;
+  AdminNotification.findOneAndUpdate = (filter, update) => {
+    capturedFilter = filter;
+    capturedUpdate = update;
     return {
-      rowCount: 1,
-      rows: [
-        {
-          id: 500,
-          recipient_admin_id: 99,
-          type: "admin_request",
-          title: "Admin Access Request",
-          message: "You have received an admin access request.",
-          metadata: { admin_request_id: 42 },
-          is_read: true,
-          created_at: "2026-03-07T03:00:00.000Z",
-        },
-      ],
+      lean: async () => ({
+        public_id: 500,
+        recipient_admin_id: 99,
+        type: "admin_request",
+        title: "Admin Access Request",
+        message: "You have received an admin access request.",
+        metadata: { admin_request_id: 42 },
+        is_read: true,
+        created_at: "2026-03-07T03:00:00.000Z",
+      }),
     };
   };
 
@@ -820,7 +855,9 @@ test("PATCH /admin/notifications/:id/read scopes update to recipient admin", asy
   await patchNotificationReadHandler(req, res);
 
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(capturedValues, [500, 99]);
+  assert.deepEqual(capturedFilter, { public_id: 500, recipient_admin_id: 99 });
+  assert.deepEqual(capturedUpdate, { $set: { is_read: true } });
+  assert.equal(res.body.notification.id, 500);
   assert.equal(res.body.notification.is_read, true);
   assert.equal(res.body.notification.recipient_admin_id, 99);
   assert.equal(res.get("cache-control"), "no-store, private, max-age=0");
@@ -829,15 +866,18 @@ test("PATCH /admin/notifications/:id/read scopes update to recipient admin", asy
 });
 
 test("PATCH /admin/notifications/:id/read returns 404 for non-recipient admin", async (t) => {
-  const originalQuery = pool.query;
+  const originalFindOneAndUpdate = AdminNotification.findOneAndUpdate;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminNotification.findOneAndUpdate = originalFindOneAndUpdate;
   });
 
-  pool.query = async () => ({
-    rowCount: 0,
-    rows: [],
-  });
+  let capturedFilter = null;
+  AdminNotification.findOneAndUpdate = (filter) => {
+    capturedFilter = filter;
+    return {
+      lean: async () => null,
+    };
+  };
 
   const req = {
     params: { id: "500" },
@@ -848,5 +888,6 @@ test("PATCH /admin/notifications/:id/read returns 404 for non-recipient admin", 
   await patchNotificationReadHandler(req, res);
 
   assert.equal(res.statusCode, 404);
+  assert.deepEqual(capturedFilter, { public_id: 500, recipient_admin_id: 11 });
   assert.deepEqual(res.body, { message: "Notification not found" });
 });

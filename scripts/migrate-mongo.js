@@ -5,6 +5,10 @@
 // - Counters advance to at least the imported maximum and never decrease.
 // - Never run a PG reimport automatically after MongoDB becomes authoritative.
 import "dotenv/config";
+import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+
+const imported = new Map();
 import { pool } from "../src/db.js";
 import { connectMongo, disconnectMongo } from "../src/mongo.js";
 import { AdminNotification } from "../src/models/AdminNotification.js";
@@ -19,25 +23,37 @@ function normalizeMetadata(value) {
   if (typeof value === "string") {
     try {
       const parsed = JSON.parse(value);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
     } catch {
-      return {};
+      // Invalid historical data must not be silently replaced with an empty object.
     }
+    throw new Error("Invalid historical notification metadata");
   }
   if (typeof value === "object" && !Array.isArray(value)) return { ...value };
-  return {};
+  throw new Error("Invalid historical notification metadata");
 }
 
 function nullToUndefined(value) {
   return value == null ? undefined : value;
 }
 
-async function upsertMany(model, docs, keyFields) {
+export async function upsertMany(model, docs, keyFields) {
+  for (const doc of docs) {
+    try {
+      await new model(doc).validate();
+    } catch (err) {
+      const detail = `${model.modelName} key=${keyFields.map((key) => doc[key]).join("/")} invalid fields: ${Object.keys(err.errors ?? {}).join(",")}`;
+      console.error(detail);
+      throw new Error("Historical document validation failed");
+    }
+  }
+  imported.set(model, { docs, keyFields });
   if (docs.length === 0) return { upserted: 0, modified: 0, matched: 0 };
   const ops = docs.map((doc) => {
     const filter = {};
     for (const key of keyFields) filter[key] = doc[key];
-    return { updateOne: { filter, update: { $set: doc }, upsert: true } };
+    const fields = Object.fromEntries(Object.entries(doc).map(([key, value]) => [key, value ?? null]));
+    return { updateOne: { filter, update: { $set: fields }, upsert: true } };
   });
   const result = await model.bulkWrite(ops, { ordered: false });
   return {
@@ -48,15 +64,12 @@ async function upsertMany(model, docs, keyFields) {
 }
 
 // Advance a counter to at least `floor` without ever decreasing it.
-async function advanceCounter(key, floor) {
-  const current = await Counter.findById(key).lean();
-  const next = Math.max(Number(current?.seq ?? 0), Number(floor ?? 0));
-  await Counter.findOneAndUpdate(
-    { _id: key },
-    { $set: { seq: next } },
-    { upsert: true }
+export async function advanceCounter(key, floor) {
+  const counter = await Counter.findOneAndUpdate(
+    { _id: key }, { $max: { seq: Number(floor ?? 0) } },
+    { upsert: true, new: true, setDefaultsOnInsert: false }
   );
-  return next;
+  return counter.seq;
 }
 
 async function importAdminNotifications() {
@@ -142,8 +155,7 @@ async function importBroadcastDeliveries() {
     const broadcastPublicId = Number(row.broadcast_id);
     const objectId = objectIdByPublicId.get(broadcastPublicId);
     if (!objectId) {
-      missingBroadcasts.add(broadcastPublicId);
-      continue;
+      throw new Error(`Delivery references missing broadcast ${broadcastPublicId}`);
     }
     docs.push({
       broadcast_id: objectId,
@@ -180,85 +192,47 @@ async function importReportRuns() {
   return { pg: rows.length, ...stats, counter };
 }
 
-function iso(value) {
-  return value ? new Date(value).toISOString() : null;
+function normalize(value) {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value?.toHexString === "function") return value.toHexString();
+  if (Array.isArray(value)) return value.map(normalize);
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, normalize(entry)]));
+  }
+  return value;
+}
+
+export function compareImportedDocuments(expected, actual, keyFields) {
+  const keyOf = (doc) => keyFields.map((key) => String(doc[key])).join("/");
+  const remaining = new Map(actual.map((doc) => [keyOf(doc), doc]));
+  const problems = [];
+  if (remaining.size !== actual.length) problems.push("duplicate keys");
+  for (const source of expected) {
+    const key = keyOf(source);
+    const target = remaining.get(key);
+    if (!target) problems.push(`missing ${key}`);
+    else {
+      for (const field of Object.keys(source)) {
+        if (!isDeepStrictEqual(normalize(source[field]), normalize(target[field]))) {
+          problems.push(`${key} field ${field}`);
+        }
+      }
+    }
+    remaining.delete(key);
+  }
+  for (const key of remaining.keys()) problems.push(`unexpected ${key}`);
+  return problems;
 }
 
 async function verify() {
   const problems = [];
   const checks = [];
-
-  async function checkCount(label, pgTable, mongoModel) {
-    const pg = await pool.query(`SELECT count(*) AS n FROM ${pgTable}`);
-    const pgCount = Number(pg.rows[0].n);
-    const mongoCount = await mongoModel.countDocuments();
-    const ok = pgCount === mongoCount;
-    checks.push({ label, pg: pgCount, mongo: mongoCount, ok });
-    if (!ok) problems.push(`${label}: PG=${pgCount} Mongo=${mongoCount}`);
-  }
-
-  await checkCount("notifications", "notifications", AdminNotification);
-  await checkCount("user_notifications", "user_notifications", UserNotification);
-  await checkCount("broadcasts", "broadcasts", Broadcast);
-  await checkCount("broadcast_user_deliveries", "broadcast_user_deliveries", BroadcastDelivery);
-  await checkCount("admin_report_runs", "admin_report_runs", ReportRun);
-
-  // Spot-check key fields on the first rows of each domain.
-  const notif = await pool.query(
-    `SELECT id, recipient_admin_id, type, title, is_read, created_at FROM notifications ORDER BY id LIMIT 3`
-  );
-  for (const row of notif.rows) {
-    const doc = await AdminNotification.findOne({ public_id: Number(row.id) }).lean();
-    const ok =
-      doc != null &&
-      doc.recipient_admin_id === Number(row.recipient_admin_id) &&
-      doc.type === String(row.type) &&
-      doc.title === String(row.title) &&
-      doc.is_read === Boolean(row.is_read) &&
-      iso(doc.created_at) === iso(row.created_at);
-    checks.push({ label: `notifications#${row.id} fields`, ok });
-    if (!ok) problems.push(`notifications#${row.id} field mismatch`);
-  }
-
-  const inbox = await pool.query(
-    `SELECT id, recipient_user_id, is_read, created_at FROM user_notifications ORDER BY id LIMIT 3`
-  );
-  for (const row of inbox.rows) {
-    const doc = await UserNotification.findOne({ public_id: Number(row.id) }).lean();
-    const ok =
-      doc != null &&
-      doc.recipient_user_id === Number(row.recipient_user_id) &&
-      doc.is_read === Boolean(row.is_read) &&
-      iso(doc.created_at) === iso(row.created_at);
-    checks.push({ label: `user_notifications#${row.id} fields`, ok });
-    if (!ok) problems.push(`user_notifications#${row.id} field mismatch`);
-  }
-
-  const casts = await pool.query(
-    `SELECT id, severity, audience_type, sent_at FROM broadcasts ORDER BY id LIMIT 5`
-  );
-  for (const row of casts.rows) {
-    const doc = await Broadcast.findOne({ public_id: Number(row.id) }).lean();
-    const ok =
-      doc != null &&
-      doc.severity === String(row.severity) &&
-      doc.audience_type === String(row.audience_type) &&
-      iso(doc.sent_at) === iso(row.sent_at);
-    checks.push({ label: `broadcasts#${row.id} fields`, ok });
-    if (!ok) problems.push(`broadcasts#${row.id} field mismatch`);
-  }
-
-  // Delivery recipient sets must match per broadcast.
-  const deliveryCounts = await pool.query(
-    `SELECT broadcast_id, count(*) AS n FROM broadcast_user_deliveries GROUP BY broadcast_id ORDER BY broadcast_id`
-  );
-  for (const row of deliveryCounts.rows) {
-    const n = await BroadcastDelivery.countDocuments({
-      broadcast_public_id: Number(row.broadcast_id),
-    });
-    const ok = n === Number(row.n);
-    checks.push({ label: `deliveries broadcast#${row.broadcast_id}`, pg: Number(row.n), mongo: n, ok });
-    if (!ok) problems.push(`deliveries broadcast#${row.broadcast_id}: PG=${row.n} Mongo=${n}`);
+  for (const [model, { docs, keyFields }] of imported) {
+    const actual = await model.find({}).lean();
+    const differences = compareImportedDocuments(docs, actual, keyFields);
+    checks.push({ label: model.modelName, ok: differences.length === 0 });
+    problems.push(...differences.map((difference) => `${model.modelName}: ${difference}`));
   }
 
   // Counters must cover the imported maximums.
@@ -288,6 +262,7 @@ async function verify() {
 async function main() {
   await connectMongo();
   try {
+    await Promise.all([AdminNotification, UserNotification, Broadcast, BroadcastDelivery, ReportRun, Counter].map((model) => model.init()));
     const summary = {
       notifications: await importAdminNotifications(),
       user_notifications: await importUserNotifications(),
@@ -312,6 +287,7 @@ async function main() {
     }
 
     if (problems.length > 0) {
+      for (const problem of problems) console.error(`VERIFY FAIL ${problem}`);
       console.error(`Migration verification failed with ${problems.length} problem(s)`);
       process.exitCode = 1;
     } else {
@@ -323,7 +299,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("Migration import failed");
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(() => {
+    console.error("Migration import failed");
+    process.exit(1);
+  });
+}

@@ -2,6 +2,7 @@ import express from "express";
 import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import { normalizeUserNotificationRow } from "../services/userNotifications.js";
+import { UserNotification } from "../models/UserNotification.js";
 
 const router = express.Router();
 
@@ -10,6 +11,22 @@ function applyNotificationNoStoreHeaders(res) {
   res.set("Pragma", "no-cache");
   res.set("Vary", "Authorization");
   res.set("Expires", "0");
+}
+
+function toUserNotificationRow(doc) {
+  if (!doc || typeof doc !== "object") {
+    return doc;
+  }
+  return {
+    id: doc.public_id,
+    recipient_user_id: doc.recipient_user_id,
+    type: doc.type,
+    title: doc.title,
+    message: doc.message,
+    metadata: doc.metadata,
+    is_read: doc.is_read,
+    created_at: doc.created_at,
+  };
 }
 
 async function getCurrentUserId(firebaseUid) {
@@ -33,17 +50,11 @@ router.get("/notifications", requireAppAuth, async (req, res) => {
       return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
     }
 
-    const result = await pool.query(
-      `
-      SELECT id, recipient_user_id, type, title, message, metadata, is_read, created_at
-      FROM user_notifications
-      WHERE recipient_user_id = $1
-      ORDER BY created_at DESC, id DESC
-      `,
-      [userId]
-    );
+    const docs = await UserNotification.find({ recipient_user_id: userId })
+      .sort({ created_at: -1, public_id: -1 })
+      .lean();
 
-    return res.json(result.rows.map(normalizeUserNotificationRow));
+    return res.json(docs.map((doc) => normalizeUserNotificationRow(toUserNotificationRow(doc))));
   } catch (err) {
     console.error("GET /notifications error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -63,24 +74,19 @@ router.patch("/notifications/:id/read", requireAppAuth, async (req, res) => {
       return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
     }
 
-    const result = await pool.query(
-      `
-      UPDATE user_notifications
-      SET is_read = true
-      WHERE id = $1
-        AND recipient_user_id = $2
-      RETURNING id, recipient_user_id, type, title, message, metadata, is_read, created_at
-      `,
-      [notificationId, userId]
-    );
+    const doc = await UserNotification.findOneAndUpdate(
+      { public_id: notificationId, recipient_user_id: userId },
+      { $set: { is_read: true } },
+      { new: true }
+    ).lean();
 
-    if (result.rowCount === 0) {
+    if (!doc) {
       return res.status(404).json({ message: "Notification not found" });
     }
 
     return res.json({
       message: "Notification marked as read",
-      notification: normalizeUserNotificationRow(result.rows[0]),
+      notification: normalizeUserNotificationRow(toUserNotificationRow(doc)),
     });
   } catch (err) {
     console.error("PATCH /notifications/:id/read error:", err);

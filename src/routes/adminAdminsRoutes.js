@@ -4,6 +4,9 @@ import { getAdminPermissions } from "../middleware/adminAuth.js";
 import { buildValidationError, validateAdminCreatePayload } from "../utils/adminAuthValidation.js";
 import { pool } from "../db.js";
 import { requireAuth, requirePermission } from "../middleware/adminAuth.js"; // ✅ FIXED
+import { AdminNotification } from "../models/AdminNotification.js";
+import { Counter } from "../models/Counter.js";
+import { auditLog } from "../utils/auditLog.js";
 
 const router = express.Router();
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -123,6 +126,22 @@ function normalizeNotificationRow(row) {
   return {
     ...row,
     metadata: withNormalizedNotificationTargets(normalizeNotificationMetadata(row.metadata), row.type),
+  };
+}
+
+function toAdminNotificationRow(doc) {
+  if (!doc || typeof doc !== "object") {
+    return doc;
+  }
+  return {
+    id: doc.public_id,
+    recipient_admin_id: doc.recipient_admin_id,
+    type: doc.type,
+    title: doc.title,
+    message: doc.message,
+    metadata: doc.metadata,
+    is_read: doc.is_read,
+    created_at: doc.created_at,
   };
 }
 
@@ -321,8 +340,17 @@ router.post(
         [normalized.email, passwordHash, normalized.full_name, roleId]
       );
 
+      const createdAdmin = result.rows[0];
+      auditLog({
+        action: "admin.account_created",
+        actor: req.admin?.adminId,
+        target: createdAdmin.email,
+        outcome: "created",
+        details: { id: createdAdmin.id },
+      });
+
       return res.status(201).json({
-        ...result.rows[0],
+        ...createdAdmin,
         role: normalized.role,
       });
     } catch (err) {
@@ -421,6 +449,13 @@ router.patch(
 
         if (adminStatusResult.rowCount > 0) {
           const adminRow = adminStatusResult.rows[0];
+          auditLog({
+            action: "admin.account_status_changed",
+            actor: req.admin?.adminId,
+            target: adminRow.email,
+            outcome: adminRow.status,
+            details: { id: adminRow.id },
+          });
           return res.json({
             id: adminRow.id,
             firebase_uid: null,
@@ -479,6 +514,14 @@ router.patch(
       if (result.rowCount === 0) {
         return res.status(404).json({ message: "User not found" });
       }
+
+      auditLog({
+        action: "admin.user_updated",
+        actor: req.admin?.adminId,
+        target: result.rows[0]?.email,
+        outcome: "updated",
+        details: { id: result.rows[0]?.id },
+      });
 
       return res.json(result.rows[0]);
     } catch (err) {
@@ -541,6 +584,14 @@ router.patch(
       if (result.rowCount === 0) {
         return res.status(404).json({ message: "Admin not found" });
       }
+
+      auditLog({
+        action: "admin.account_updated",
+        actor: req.admin?.adminId,
+        target: result.rows[0]?.email,
+        outcome: "updated",
+        details: { id: result.rows[0]?.id },
+      });
 
       return res.json(result.rows[0]);
     } catch (err) {
@@ -610,24 +661,18 @@ router.get("/admin/notifications", requireAuth, async (req, res) => {
       return res.status(401).json({ message: "Unauthorized" });
     }
 
-    const notificationsResult = await pool.query(
-      `
-      SELECT id, recipient_admin_id, type, title, message, metadata, is_read, created_at
-      FROM notifications
-      WHERE recipient_admin_id = $1
-      ORDER BY created_at DESC
-      `,
-      [adminId]
-    );
+    const docs = await AdminNotification.find({ recipient_admin_id: adminId })
+      .sort({ created_at: -1, public_id: -1 })
+      .lean();
     logDebug("notifications.list", {
       currentAdminId: adminId,
-      resultCount: notificationsResult.rowCount,
+      resultCount: docs.length,
     });
     if (IS_DEBUG_LOG) {
       res.set("X-Current-Admin-Id", String(adminId));
-      res.set("X-Notifications-Count", String(notificationsResult.rowCount ?? 0));
+      res.set("X-Notifications-Count", String(docs.length));
     }
-    return res.json(notificationsResult.rows.map(normalizeNotificationRow));
+    return res.json(docs.map((doc) => normalizeNotificationRow(toAdminNotificationRow(doc))));
   } catch (err) {
     console.error("GET /admin/notifications error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -699,33 +744,38 @@ router.post(
         throw new Error("Invalid recipient_admin_id for notification insert");
       }
       const notificationTitle = "Admin Access Request".trim() || "Notification";
-      const notificationInsertResult = await client.query(
-        `
-        INSERT INTO notifications (
-          recipient_admin_id, type, title, message, metadata, is_read, created_at
-        ) VALUES ($1, $2, $3, $4, $5::jsonb, false, NOW())
-        RETURNING id
-        `,
-        [
-          recipientAdminId,
-          "admin_request",
-          notificationTitle,
-          "You have received an admin access request.",
-          JSON.stringify({
-            admin_request_id: adminRequestId,
-            requested_by_admin_id: requestedByAdminId,
-          }),
-        ]
-      );
-      const notificationId = Number(notificationInsertResult.rows?.[0]?.id ?? null);
-      logDebug("admin_request.notification_created", {
-        requesterAdminId: requestedByAdminId,
-        recipientAdminId,
-        adminRequestId,
-        notificationId: Number.isInteger(notificationId) ? notificationId : null,
-      });
 
       await client.query("COMMIT");
+
+      try {
+        const notificationPublicId = await Counter.nextPublicId("notifications");
+        const createdNotification = await AdminNotification.create({
+          public_id: notificationPublicId,
+          recipient_admin_id: recipientAdminId,
+          type: "admin_request",
+          title: notificationTitle,
+          message: "You have received an admin access request.",
+          metadata: {
+            admin_request_id: adminRequestId,
+            requested_by_admin_id: requestedByAdminId,
+          },
+          is_read: false,
+          created_at: new Date(),
+        });
+        const notificationId = Number(createdNotification?.public_id ?? notificationPublicId);
+        logDebug("admin_request.notification_created", {
+          requesterAdminId: requestedByAdminId,
+          recipientAdminId,
+          adminRequestId,
+          notificationId: Number.isInteger(notificationId) ? notificationId : null,
+        });
+      } catch (notifyErr) {
+        console.error("POST /admin/admin-requests notification error:", notifyErr?.message || notifyErr, {
+          requesterAdminId: requestedByAdminId,
+          recipientAdminId,
+          adminRequestId,
+        });
+      }
 
       return res.status(201).json({
         message: "Admin request sent",
@@ -850,6 +900,13 @@ router.patch(
 
       await client.query("COMMIT");
 
+      auditLog({
+        action: "admin.admin_request_approved",
+        actor: decidedByAdminId,
+        target: `admin_request:${requestId}`,
+        outcome: "approved",
+      });
+
       return res.json({
         message: "Admin request approved",
         request: requestUpdateResult.rows[0],
@@ -939,6 +996,13 @@ router.patch(
 
       await client.query("COMMIT");
 
+      auditLog({
+        action: "admin.admin_request_rejected",
+        actor: decidedByAdminId,
+        target: `admin_request:${requestId}`,
+        outcome: "rejected",
+      });
+
       return res.json({
         message: "Admin request rejected",
         request: updateResult.rows[0],
@@ -973,23 +1037,19 @@ router.patch("/admin/notifications/:id/read", requireAuth, async (req, res) => {
       return res.status(401).json({ message: "Unauthorized" });
     }
 
-    const updateResult = await pool.query(
-      `
-      UPDATE notifications
-      SET is_read = true
-      WHERE id = $1 AND recipient_admin_id = $2
-      RETURNING id, recipient_admin_id, type, title, message, metadata, is_read, created_at
-      `,
-      [notificationId, adminId]
-    );
+    const doc = await AdminNotification.findOneAndUpdate(
+      { public_id: notificationId, recipient_admin_id: adminId },
+      { $set: { is_read: true } },
+      { new: true }
+    ).lean();
 
-    if (updateResult.rowCount === 0) {
+    if (!doc) {
       return res.status(404).json({ message: "Notification not found" });
     }
 
     return res.json({
       message: "Notification marked as read",
-      notification: normalizeNotificationRow(updateResult.rows[0]),
+      notification: normalizeNotificationRow(toAdminNotificationRow(doc)),
     });
   } catch (err) {
     console.error("PATCH /admin/notifications/:id/read error:", err);

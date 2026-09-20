@@ -14,7 +14,7 @@
     "start:prod": "NODE_ENV=production node server.js",
     "hash:admin-password": "node scripts/generateBcryptHash.js",
     "mongo:import": "node scripts/migrate-mongo.js",
-    "test": "node src/adminAuthRoutes.contract.test.js && node src/meRoutes.patch.test.js && node src/meRoutes.bootstrap.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js && node src/broadcastRoutes.auth.test.js && node src/broadcastRoutes.create.test.js && node src/requireAuth.middleware.test.js && node src/friendRoutes.test.js && node src/adminSosRoutes.liveops.test.js && node src/incidentRoutes.admin.test.js && node src/sosRoutes.test.js && node src/adminReportsRoutes.test.js && node src/userNotifications.test.js"
+    "test": "node src/adminAuthRoutes.contract.test.js && node src/meRoutes.patch.test.js && node src/meRoutes.bootstrap.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js && node src/broadcastRoutes.auth.test.js && node src/broadcastRoutes.create.test.js && node src/requireAuth.middleware.test.js && node src/friendRoutes.test.js && node src/adminSosRoutes.liveops.test.js && node src/incidentRoutes.admin.test.js && node src/sosRoutes.test.js && node src/adminReportsRoutes.test.js && node src/userNotifications.test.js && node src/phase1-5.regression.test.js && node src/security.http.test.js"
   },
   "keywords": [
     "beacon",

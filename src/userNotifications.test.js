@@ -12,6 +12,8 @@ import {
   notifyUserLifecycleEvent,
   setUserNotificationMulticastSenderForTests,
 } from "./services/userNotifications.js";
+import { UserNotification } from "./models/UserNotification.js";
+import { Counter } from "./models/Counter.js";
 
 function getRoute(router, path, method) {
   const layer = router.stack.find(
@@ -70,10 +72,14 @@ test("buildUserLifecycleNotification creates app-compatible SOS payload fields",
 
 test("notifyUserLifecycleEvent stores notification when device token is missing", async (t) => {
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   const originalInfo = console.info;
   const infoLogs = [];
   t.after(() => {
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
     setUserNotificationMulticastSenderForTests(null);
     console.info = originalInfo;
   });
@@ -81,27 +87,28 @@ test("notifyUserLifecycleEvent stores notification when device token is missing"
     infoLogs.push(args);
   };
 
-  let insertParams = null;
+  let createdDoc = null;
+  Counter.nextPublicId = async (key) => {
+    assert.equal(key, "user_notifications");
+    return 1;
+  };
+  UserNotification.create = async (doc) => {
+    createdDoc = doc;
+    return {
+      toObject: () => ({
+        public_id: 1,
+        recipient_user_id: 9,
+        type: "incident_update",
+        title: "Incident Update",
+        message: "Your incident report has been dispatched to Fire Station Unit.",
+        metadata: { incident_id: 19, status: "dispatched", fallback_route: "/incidents/19" },
+        is_read: false,
+        created_at: "2026-03-19T03:00:00.000Z",
+      }),
+    };
+  };
   pool.query = async (sql, params) => {
     const text = String(sql);
-    if (/INSERT INTO user_notifications/i.test(text)) {
-      insertParams = params;
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            id: 1,
-            recipient_user_id: 9,
-            type: "incident_update",
-            title: "Incident Update",
-            message: "Your incident report has been dispatched to Fire Station Unit.",
-            metadata: { incident_id: 19, status: "dispatched", fallback_route: "/incidents/19" },
-            is_read: false,
-            created_at: "2026-03-19T03:00:00.000Z",
-          },
-        ],
-      };
-    }
     if (/FROM devices/i.test(text)) {
       return { rowCount: 0, rows: [] };
     }
@@ -122,8 +129,9 @@ test("notifyUserLifecycleEvent stores notification when device token is missing"
 
   assert.equal(result.ok, true);
   assert.equal(result.push.reason, "no_device_tokens");
-  assert.equal(insertParams[0], 9);
-  assert.equal(insertParams[1], "incident_update");
+  assert.equal(result.notification.id, 1);
+  assert.equal(createdDoc.recipient_user_id, 9);
+  assert.equal(createdDoc.type, "incident_update");
   assert.equal(
     infoLogs.some(
       ([message, payload]) =>
@@ -146,30 +154,32 @@ test("notifyUserLifecycleEvent stores notification when device token is missing"
 
 test("notifyUserLifecycleEvent logs and continues when FCM send fails", async (t) => {
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   t.after(() => {
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
     setUserNotificationMulticastSenderForTests(null);
   });
 
+  Counter.nextPublicId = async () => 2;
+  UserNotification.create = async (doc) => ({
+    toObject: () => ({
+      public_id: 2,
+      recipient_user_id: 5,
+      type: "sos_update",
+      title: "SOS Update",
+      message: "Your SOS has been resolved.",
+      metadata: { sos_id: 22, status: "resolved", fallback_route: "/sos/22" },
+      is_read: false,
+      created_at: "2026-03-19T03:00:00.000Z",
+      ...doc,
+      public_id: 2,
+    }),
+  });
   pool.query = async (sql) => {
     const text = String(sql);
-    if (/INSERT INTO user_notifications/i.test(text)) {
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            id: 2,
-            recipient_user_id: 5,
-            type: "sos_update",
-            title: "SOS Update",
-            message: "Your SOS has been resolved.",
-            metadata: { sos_id: 22, status: "resolved", fallback_route: "/sos/22" },
-            is_read: false,
-            created_at: "2026-03-19T03:00:00.000Z",
-          },
-        ],
-      };
-    }
     if (/FROM devices/i.test(text)) {
       return { rowCount: 1, rows: [{ fcm_token: "token-1" }] };
     }
@@ -315,41 +325,45 @@ test("notifySosFriendsTerminalEvent removes invalid tokens and keeps partial suc
 
 test("GET /notifications returns current user notifications newest first", async (t) => {
   const originalQuery = pool.query;
+  const originalFind = UserNotification.find;
   t.after(() => {
     pool.query = originalQuery;
+    UserNotification.find = originalFind;
   });
 
-  let queryCount = 0;
   pool.query = async (sql, params) => {
-    queryCount += 1;
-    if (queryCount === 1) {
-      assert.equal(params[0], "firebase-uid-1");
-      return { rowCount: 1, rows: [{ id: 44 }] };
-    }
+    assert.equal(params[0], "firebase-uid-1");
+    return { rowCount: 1, rows: [{ id: 44 }] };
+  };
+
+  let capturedFilter = null;
+  UserNotification.find = (filter) => {
+    capturedFilter = filter;
     return {
-      rowCount: 2,
-      rows: [
-        {
-          id: 10,
-          recipient_user_id: 44,
-          type: "incident_update",
-          title: "Incident Update",
-          message: "Your incident report has been resolved.",
-          metadata: { incident_id: "88", status: "resolved", created_at: "2026-03-19T03:00:00.000Z" },
-          is_read: false,
-          created_at: "2026-03-19T03:00:00.000Z",
-        },
-        {
-          id: 9,
-          recipient_user_id: 44,
-          type: "sos_update",
-          title: "SOS Update",
-          message: "Your SOS has been acknowledged.",
-          metadata: { sos_id: "55" },
-          is_read: true,
-          created_at: "2026-03-19T02:00:00.000Z",
-        },
-      ],
+      sort: () => ({
+        lean: async () => [
+          {
+            public_id: 10,
+            recipient_user_id: 44,
+            type: "incident_update",
+            title: "Incident Update",
+            message: "Your incident report has been resolved.",
+            metadata: { incident_id: "88", status: "resolved", created_at: "2026-03-19T03:00:00.000Z" },
+            is_read: false,
+            created_at: "2026-03-19T03:00:00.000Z",
+          },
+          {
+            public_id: 9,
+            recipient_user_id: 44,
+            type: "sos_update",
+            title: "SOS Update",
+            message: "Your SOS has been acknowledged.",
+            metadata: { sos_id: "55" },
+            is_read: true,
+            created_at: "2026-03-19T02:00:00.000Z",
+          },
+        ],
+      }),
     };
   };
 
@@ -361,7 +375,9 @@ test("GET /notifications returns current user notifications newest first", async
   await handler(req, res);
 
   assert.equal(res.statusCode, 200);
+  assert.deepEqual(capturedFilter, { recipient_user_id: 44 });
   assert.equal(res.body.length, 2);
+  assert.equal(res.body[0].id, 10);
   assert.equal(res.body[0].metadata.incident_id, 88);
   assert.equal(res.body[1].metadata.sos_id, 55);
   assert.equal(res.body[1].metadata.fallback_route, "/sos/55");
@@ -369,31 +385,30 @@ test("GET /notifications returns current user notifications newest first", async
 
 test("PATCH /notifications/:id/read scopes updates to the authenticated user", async (t) => {
   const originalQuery = pool.query;
+  const originalFindOneAndUpdate = UserNotification.findOneAndUpdate;
   t.after(() => {
     pool.query = originalQuery;
+    UserNotification.findOneAndUpdate = originalFindOneAndUpdate;
   });
 
-  let queryCount = 0;
-  pool.query = async (sql, params) => {
-    queryCount += 1;
-    if (queryCount === 1) {
-      return { rowCount: 1, rows: [{ id: 44 }] };
-    }
-    assert.deepEqual(params, [17, 44]);
+  pool.query = async () => ({ rowCount: 1, rows: [{ id: 44 }] });
+
+  let capturedFilter = null;
+  let capturedUpdate = null;
+  UserNotification.findOneAndUpdate = (filter, update) => {
+    capturedFilter = filter;
+    capturedUpdate = update;
     return {
-      rowCount: 1,
-      rows: [
-        {
-          id: 17,
-          recipient_user_id: 44,
-          type: "incident_update",
-          title: "Incident Update",
-          message: "Your incident report has been resolved.",
-          metadata: { incident_id: 90 },
-          is_read: true,
-          created_at: "2026-03-19T03:00:00.000Z",
-        },
-      ],
+      lean: async () => ({
+        public_id: 17,
+        recipient_user_id: 44,
+        type: "incident_update",
+        title: "Incident Update",
+        message: "Your incident report has been resolved.",
+        metadata: { incident_id: 90 },
+        is_read: true,
+        created_at: "2026-03-19T03:00:00.000Z",
+      }),
     };
   };
 
@@ -405,18 +420,73 @@ test("PATCH /notifications/:id/read scopes updates to the authenticated user", a
   await handler(req, res);
 
   assert.equal(res.statusCode, 200);
+  assert.deepEqual(capturedFilter, { public_id: 17, recipient_user_id: 44 });
+  assert.deepEqual(capturedUpdate, { $set: { is_read: true } });
+  assert.equal(res.body.notification.id, 17);
   assert.equal(res.body.notification.is_read, true);
   assert.equal(res.body.notification.recipient_user_id, 44);
+});
+
+test("PATCH /notifications/:id/read returns 404 for another recipient's notification", async (t) => {
+  const originalQuery = pool.query;
+  const originalFindOneAndUpdate = UserNotification.findOneAndUpdate;
+  t.after(() => {
+    pool.query = originalQuery;
+    UserNotification.findOneAndUpdate = originalFindOneAndUpdate;
+  });
+
+  pool.query = async () => ({ rowCount: 1, rows: [{ id: 44 }] });
+
+  let capturedFilter = null;
+  UserNotification.findOneAndUpdate = (filter) => {
+    capturedFilter = filter;
+    return {
+      lean: async () => null,
+    };
+  };
+
+  const stack = getRoute(notificationRouter, "/notifications/:id/read", "patch");
+  const handler = stack[stack.length - 1].handle;
+  const req = { auth: { uid: "firebase-uid-1" }, params: { id: "18" } };
+  const res = createRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(capturedFilter, { public_id: 18, recipient_user_id: 44 });
+  assert.deepEqual(res.body, { message: "Notification not found" });
 });
 
 test("PATCH /admin/incidents/:id sends sender notification only on status milestone changes", async (t) => {
   const originalConnect = pool.connect;
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   t.after(() => {
     pool.connect = originalConnect;
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
     setUserNotificationMulticastSenderForTests(null);
   });
+
+  const createdDocs = [];
+  Counter.nextPublicId = async () => 91;
+  UserNotification.create = async (doc) => {
+    createdDocs.push(doc);
+    return {
+      toObject: () => ({
+        public_id: 91,
+        recipient_user_id: 33,
+        type: "incident_update",
+        title: "Incident Update",
+        message: "Your incident report has been dispatched to Fire Station Unit.",
+        metadata: { incident_id: 7, status: "dispatched", assigned_department: "Fire Station Unit" },
+        is_read: false,
+        created_at: "2026-03-19T01:05:01.000Z",
+      }),
+    };
+  };
 
   const clientQueries = [];
   const poolQueries = [];
@@ -484,21 +554,7 @@ test("PATCH /admin/incidents/:id sends sender notification only on status milest
       };
     }
     if (/INSERT INTO user_notifications/i.test(text)) {
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            id: 91,
-            recipient_user_id: 33,
-            type: "incident_update",
-            title: "Incident Update",
-            message: "Your incident report has been dispatched to Fire Station Unit.",
-            metadata: { incident_id: 7, status: "dispatched", assigned_department: "Fire Station Unit" },
-            is_read: false,
-            created_at: "2026-03-19T01:05:01.000Z",
-          },
-        ],
-      };
+      throw new Error("user_notifications must be persisted to MongoDB, not PostgreSQL");
     }
     if (/FROM devices/i.test(text)) {
       return { rowCount: 1, rows: [{ fcm_token: "token-7" }] };
@@ -525,10 +581,9 @@ test("PATCH /admin/incidents/:id sends sender notification only on status milest
   assert.equal(res.statusCode, 200);
   assert.equal(sentMessages.length, 1);
   assert.equal(sentMessages[0].data.incident_id, "7");
-  assert.equal(
-    poolQueries.some((entry) => /INSERT INTO user_notifications/i.test(entry.sql)),
-    true
-  );
+  assert.equal(createdDocs.length, 1);
+  assert.equal(createdDocs[0].recipient_user_id, 33);
+  assert.equal(createdDocs[0].type, "incident_update");
   assert.equal(
     clientQueries.some((entry) => /UPDATE incident_reports/i.test(entry.sql)),
     true
@@ -644,11 +699,33 @@ test("PATCH /admin/incidents/:id logs sender notification skip for non-milestone
 test("POST /admin/sos/:sosId/acknowledge creates sender notification with assigned unit", async (t) => {
   const originalConnect = pool.connect;
   const originalQuery = pool.query;
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = UserNotification.create;
   t.after(() => {
     pool.connect = originalConnect;
     pool.query = originalQuery;
+    Counter.nextPublicId = originalNextPublicId;
+    UserNotification.create = originalCreate;
     setUserNotificationMulticastSenderForTests(null);
   });
+
+  const createdDocs = [];
+  Counter.nextPublicId = async () => 101;
+  UserNotification.create = async (doc) => {
+    createdDocs.push(doc);
+    return {
+      toObject: () => ({
+        public_id: 101,
+        recipient_user_id: 42,
+        type: "sos_update",
+        title: "SOS Update",
+        message: "Your SOS has been acknowledged by Emergency Medical Unit.",
+        metadata: { sos_id: 5, status: "acknowledged", assigned_unit: "Emergency Medical Unit" },
+        is_read: false,
+        created_at: "2026-03-19T01:00:01.000Z",
+      }),
+    };
+  };
 
   const sentMessages = [];
   const client = {
@@ -718,21 +795,7 @@ test("POST /admin/sos/:sosId/acknowledge creates sender notification with assign
       };
     }
     if (/INSERT INTO user_notifications/i.test(text)) {
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            id: 101,
-            recipient_user_id: 42,
-            type: "sos_update",
-            title: "SOS Update",
-            message: "Your SOS has been acknowledged by Emergency Medical Unit.",
-            metadata: { sos_id: 5, status: "acknowledged", assigned_unit: "Emergency Medical Unit" },
-            is_read: false,
-            created_at: "2026-03-19T01:00:01.000Z",
-          },
-        ],
-      };
+      throw new Error("user_notifications must be persisted to MongoDB, not PostgreSQL");
     }
     if (/FROM devices/i.test(text)) {
       return { rowCount: 1, rows: [{ fcm_token: "token-42" }] };
@@ -761,8 +824,7 @@ test("POST /admin/sos/:sosId/acknowledge creates sender notification with assign
   assert.equal(sentMessages.length, 1);
   assert.equal(sentMessages[0].data.sos_id, "5");
   assert.equal(sentMessages[0].data.sender_user_id, "42");
-  assert.equal(
-    poolQueryLog.some((entry) => /INSERT INTO user_notifications/i.test(entry)),
-    true
-  );
+  assert.equal(createdDocs.length, 1);
+  assert.equal(createdDocs[0].recipient_user_id, 42);
+  assert.equal(createdDocs[0].type, "sos_update");
 });

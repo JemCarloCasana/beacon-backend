@@ -1,6 +1,9 @@
 import express from "express";
 import { pool } from "../db.js";
 import { requireAdminAuth } from "../middleware/adminAuth.js";
+import { ReportRun } from "../models/ReportRun.js";
+import { Counter } from "../models/Counter.js";
+import { auditLog } from "../utils/auditLog.js";
 
 const router = express.Router();
 
@@ -169,31 +172,14 @@ function toCsv(rows) {
 }
 
 async function getCardsMetadata(timezone) {
-  const result = await pool.query(
-    `
-    SELECT report_key, range_key, generated_at
-    FROM (
-      SELECT
-        report_key,
-        range_key,
-        timezone,
-        generated_at,
-        ROW_NUMBER() OVER (
-          PARTITION BY report_key, range_key, timezone
-          ORDER BY generated_at DESC
-        ) AS rn
-      FROM admin_report_runs
-      WHERE timezone = $1
-    ) latest
-    WHERE rn = 1
-    `,
-    [timezone]
-  );
+  const runs = await ReportRun.find({ timezone }).sort({ generated_at: -1 }).lean();
 
   const lastGeneratedMap = new Map();
-  for (const row of result.rows) {
-    const key = `${row.report_key}|${row.range_key}`;
-    lastGeneratedMap.set(key, toIso(row.generated_at));
+  for (const run of runs) {
+    const key = `${run.report_key}|${run.range_key}`;
+    if (!lastGeneratedMap.has(key)) {
+      lastGeneratedMap.set(key, toIso(run.generated_at));
+    }
   }
 
   return CARD_ORDER.map((card) => ({
@@ -638,19 +624,23 @@ router.post("/admin/reports/generate", requireAdminAuth, async (req, res) => {
     const analytics = await buildAnalytics({ range, timezone, now: generatedAt });
 
     const adminId = Number(req.admin?.adminId);
-    await pool.query(
-      `
-      INSERT INTO admin_report_runs (
-        report_key,
-        range_key,
-        timezone,
-        generated_by_admin_id,
-        generated_at,
-        payload_hash
-      ) VALUES ($1, $2, $3, $4, $5, NULL)
-      `,
-      [reportKey, range, timezone, Number.isInteger(adminId) ? adminId : null, generatedAt.toISOString()]
-    );
+    const createdRun = await ReportRun.create({
+      public_id: await Counter.nextPublicId("admin_report_runs"),
+      report_key: reportKey,
+      range_key: range,
+      timezone,
+      generated_by_admin_id: Number.isInteger(adminId) && adminId > 0 ? adminId : null,
+      generated_at: generatedAt,
+      payload_hash: null,
+    });
+
+    auditLog({
+      action: "report.generated",
+      actor: Number.isInteger(adminId) ? adminId : null,
+      target: `${reportKey}|${range}|${timezone}`,
+      outcome: "generated",
+      details: { publicId: createdRun?.public_id ?? null },
+    });
 
     const cards = await getCardsMetadata(timezone);
     return res.json({

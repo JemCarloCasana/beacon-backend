@@ -1,5 +1,7 @@
 import admin from "../firebaseAdmin.js";
 import { pool } from "../db.js";
+import { UserNotification } from "../models/UserNotification.js";
+import { Counter } from "../models/Counter.js";
 
 let customSendMulticast = null;
 
@@ -117,6 +119,22 @@ export function normalizeUserNotificationRow(row) {
   return {
     ...row,
     metadata: normalized,
+  };
+}
+
+export function toUserNotificationRow(doc) {
+  if (!doc || typeof doc !== "object") {
+    return doc;
+  }
+  return {
+    id: doc.public_id,
+    recipient_user_id: doc.recipient_user_id,
+    type: doc.type,
+    title: doc.title,
+    message: doc.message,
+    metadata: doc.metadata,
+    is_read: doc.is_read,
+    created_at: doc.created_at,
   };
 }
 
@@ -364,29 +382,23 @@ export async function notifyUserLifecycleEvent(input) {
 
   logNotificationTrace("start", resolvedTrace);
 
-  const insertResult = await pool.query(
-    `
-    INSERT INTO user_notifications (
-      recipient_user_id,
-      type,
-      title,
-      message,
-      metadata,
-      is_read,
-      created_at
-    ) VALUES ($1, $2, $3, $4, $5::jsonb, false, NOW())
-    RETURNING id, recipient_user_id, type, title, message, metadata, is_read, created_at
-    `,
-    [
-      built.recipientUserId,
-      built.type,
-      built.title,
-      built.message,
-      JSON.stringify(built.metadata),
-    ]
-  );
+  const publicId = await Counter.nextPublicId("user_notifications");
+  const created = await UserNotification.create({
+    public_id: publicId,
+    recipient_user_id: built.recipientUserId,
+    type: built.type,
+    title: built.title,
+    message: built.message,
+    metadata: built.metadata,
+    is_read: false,
+    created_at: new Date(),
+  });
 
-  const inserted = normalizeUserNotificationRow(insertResult.rows[0]);
+  const inserted = normalizeUserNotificationRow(
+    toUserNotificationRow(
+      typeof created.toObject === "function" ? created.toObject() : created
+    )
+  );
   inserted.metadata = {
     ...inserted.metadata,
     created_at: toIso(inserted.created_at),

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import router from "./routes/adminReportsRoutes.js";
 import { pool } from "./db.js";
+import { ReportRun } from "./models/ReportRun.js";
+import { Counter } from "./models/Counter.js";
 
 function getRoute(path, method) {
   const layer = router.stack.find(
@@ -178,26 +180,59 @@ function createReportsQueryMock({ generatedRows = [], priorityRows } = {}) {
     }
 
     if (text.includes("INSERT INTO admin_report_runs")) {
-      state.inserts.push(params);
-      state.generatedRows.push({
-        report_key: params[0],
-        range_key: params[1],
-        generated_at: params[4]
-      });
-      return { rowCount: 1, rows: [] };
+      throw new Error("admin_report_runs must be persisted to MongoDB, not PostgreSQL");
     }
 
     if (text.includes("FROM admin_report_runs")) {
-      return {
-        rowCount: state.generatedRows.length,
-        rows: state.generatedRows.map((row) => ({ ...row }))
-      };
+      throw new Error("admin_report_runs must be read from MongoDB, not PostgreSQL");
     }
 
     throw new Error(`Unexpected query in test: ${text}`);
   };
 
   return { query, state };
+}
+
+function stubReportRunModels(t, state) {
+  const originalNextPublicId = Counter.nextPublicId;
+  const originalCreate = ReportRun.create;
+  const originalFind = ReportRun.find;
+  t.after(() => {
+    Counter.nextPublicId = originalNextPublicId;
+    ReportRun.create = originalCreate;
+    ReportRun.find = originalFind;
+  });
+
+  let capturedFilter = null;
+  Counter.nextPublicId = async (key) => {
+    assert.equal(key, "admin_report_runs");
+    return 1000 + state.inserts.length + 1;
+  };
+  ReportRun.create = async (doc) => {
+    state.inserts.push(doc);
+    state.generatedRows.push({
+      report_key: doc.report_key,
+      range_key: doc.range_key,
+      timezone: doc.timezone,
+      generated_at:
+        doc.generated_at instanceof Date ? doc.generated_at.toISOString() : doc.generated_at,
+    });
+    return { public_id: doc.public_id, ...doc };
+  };
+  ReportRun.find = (filter) => {
+    capturedFilter = filter;
+    return {
+      sort: () => ({
+        lean: async () =>
+          state.generatedRows
+            .filter((row) => row.timezone == null || row.timezone === filter?.timezone)
+            .map((row) => ({ ...row }))
+            .sort((a, b) => (a.generated_at < b.generated_at ? 1 : -1)),
+      }),
+    };
+  };
+
+  return { capturedFilter: () => capturedFilter };
 }
 
 test("GET /admin/reports/overview uses admin auth middleware without extra permission guard", () => {
@@ -245,6 +280,7 @@ test("POST /admin/reports/generate accepts combined safety report keys and rejec
   const originalQuery = pool.query;
   const { query, state } = createReportsQueryMock();
   pool.query = query;
+  stubReportRunModels(t, state);
 
   t.after(() => {
     pool.query = originalQuery;
@@ -284,18 +320,20 @@ test("POST /admin/reports/generate accepts combined safety report keys and rejec
   assert.deepEqual(rejectedRes.body, { message: "Invalid report_key" });
   assert.equal(state.inserts.length, 3);
   assert.deepEqual(
-    state.inserts.map((params) => [params[0], params[1], params[2], params[3]]),
+    state.inserts.map((doc) => [doc.report_key, doc.range_key, doc.timezone, doc.generated_by_admin_id]),
     [
       ["daily_safety_report", "24h", "Asia/Manila", 9],
       ["weekly_safety_report", "7d", "Asia/Manila", 9],
       ["monthly_safety_report", "30d", "Asia/Manila", 9]
     ]
   );
+  assert.ok(state.inserts.every((doc) => doc.generated_at instanceof Date));
+  assert.ok(state.inserts.every((doc) => Number.isInteger(doc.public_id) && doc.public_id > 0));
 });
 
 test("GET /admin/reports/overview returns analytics payload with exactly three combined cards", async (t) => {
   const originalQuery = pool.query;
-  const { query } = createReportsQueryMock({
+  const { query, state } = createReportsQueryMock({
     generatedRows: [
       {
         report_key: "daily_safety_report",
@@ -315,6 +353,7 @@ test("GET /admin/reports/overview returns analytics payload with exactly three c
     ]
   });
   pool.query = query;
+  stubReportRunModels(t, state);
 
   t.after(() => {
     pool.query = originalQuery;
@@ -371,7 +410,7 @@ test("GET /admin/reports/overview returns analytics payload with exactly three c
 
 test("GET /admin/reports/overview normalizes mixed-case priorities and excludes blank buckets", async (t) => {
   const originalQuery = pool.query;
-  const { query } = createReportsQueryMock({
+  const { query, state } = createReportsQueryMock({
     priorityRows: [
       { label: "HIGH", value: 2 },
       { label: "Medium", value: 3 },
@@ -381,6 +420,7 @@ test("GET /admin/reports/overview normalizes mixed-case priorities and excludes 
     ]
   });
   pool.query = query;
+  stubReportRunModels(t, state);
 
   t.after(() => {
     pool.query = originalQuery;
@@ -403,8 +443,9 @@ test("GET /admin/reports/overview normalizes mixed-case priorities and excludes 
 
 test("GET /admin/reports/overview returns all zero priority buckets for empty ranges", async (t) => {
   const originalQuery = pool.query;
-  const { query } = createReportsQueryMock({ priorityRows: [] });
+  const { query, state } = createReportsQueryMock({ priorityRows: [] });
   pool.query = query;
+  stubReportRunModels(t, state);
 
   t.after(() => {
     pool.query = originalQuery;
@@ -427,8 +468,9 @@ test("GET /admin/reports/overview returns all zero priority buckets for empty ra
 
 test("GET /admin/reports/export.csv returns combined CSV for 24h, 7d, and 30d", async (t) => {
   const originalQuery = pool.query;
-  const { query } = createReportsQueryMock();
+  const { query, state } = createReportsQueryMock();
   pool.query = query;
+  stubReportRunModels(t, state);
 
   t.after(() => {
     pool.query = originalQuery;
@@ -461,7 +503,7 @@ test("GET /admin/reports/export.csv returns combined CSV for 24h, 7d, and 30d", 
 
 test("weekly generate plus 7d export keeps overview last_generated_at in sync", async (t) => {
   const originalQuery = pool.query;
-  const { query } = createReportsQueryMock({
+  const { query, state } = createReportsQueryMock({
     generatedRows: [
       {
         report_key: "daily_safety_report",
@@ -476,6 +518,7 @@ test("weekly generate plus 7d export keeps overview last_generated_at in sync", 
     ]
   });
   pool.query = query;
+  stubReportRunModels(t, state);
 
   t.after(() => {
     pool.query = originalQuery;
