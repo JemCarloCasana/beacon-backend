@@ -1,7 +1,7 @@
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { pool } from "../db.js";
-import { requireAdminAuth } from "../middleware/adminAuth.js";
+import { requireAdminAuth, requirePermission } from "../middleware/adminAuth.js";
 import {
   appendAdminStatusEvent,
   getLatestThreadEventForUpdate,
@@ -21,6 +21,9 @@ import {
   writeSnapshotToStream
 } from "../services/sosLiveOps.js";
 import { notifySosFriendsTerminalEvent, notifyUserLifecycleEvent } from "../services/userNotifications.js";
+import { isMongoConnected } from "../mongo.js";
+import { Counter } from "../models/Counter.js";
+import { SosThread, SosEvent } from "../models/Remaining.js";
 
 const router = express.Router();
 const MAX_NOTE_LENGTH = 1000;
@@ -108,7 +111,7 @@ function getRequestTrace(req, overrides = {}) {
   };
 }
 
-router.get("/admin/sos/live-map", requireAdminAuth, async (req, res) => {
+router.get("/admin/sos/live-map", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
   try {
     const rows = await listLiveMapRows();
     return res.json(rows);
@@ -118,7 +121,7 @@ router.get("/admin/sos/live-map", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get("/admin/sos/live", requireAdminAuth, async (req, res) => {
+router.get("/admin/sos/live", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
   try {
     const parsed = parseLiveListParams(req.query);
     if (!parsed.ok) {
@@ -136,7 +139,7 @@ router.get("/admin/sos/live", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get("/admin/sos/live/stream", requireAdminAuth, async (req, res) => {
+router.get("/admin/sos/live/stream", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
   if (!isSseEnabled()) {
     return res.status(404).json({ message: "SSE stream is disabled" });
   }
@@ -185,7 +188,7 @@ router.get("/admin/sos/live/stream", requireAdminAuth, async (req, res) => {
   });
 });
 
-router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, async (req, res) => {
+router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
   const sosId = parsePositiveInt(req.params.sosId);
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });
@@ -203,6 +206,25 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, async (req, res) 
   const assignedUnit = parseAssignedUnit(req.body);
   if (assignedUnit?.error) {
     return res.status(400).json({ message: assignedUnit.error });
+  }
+
+  if (isMongoConnected()) {
+    try {
+      const thread = await SosThread.findOne({ root_event_id: sosId }).lean();
+      if (!thread) return res.status(404).json({ message: "SOS thread not found" });
+      if (thread.latest_status === "resolved") return res.status(409).json({ message: "SOS thread is already resolved" });
+      const now = new Date();
+      const changed = await SosThread.updateOne({ public_id: thread.public_id, latest_status: "active" }, { $set: { acknowledged_at: now, acknowledged_by_admin_id: Number(req.admin.adminId), assigned_unit: assignedUnit, updated_at: now } });
+      if (changed.modifiedCount !== 1) return res.status(409).json({ message: "SOS thread is already resolved" });
+      const latest = await SosEvent.findOne({ thread_id: thread.public_id }).sort({ created_at: -1, public_id: -1 }).lean();
+      await SosEvent.create({ public_id: await Counter.nextPublicId("sos_events"), thread_id: thread.public_id, sos_id: sosId, user_id: thread.user_id, latitude: latest?.latitude, longitude: latest?.longitude, address: latest?.address, message: typeof note === "string" ? note : undefined, status: "active", actor_type: "admin", actor_admin_id: Number(req.admin.adminId), event_type: "admin_acknowledged", emergency_category: thread.emergency_category, created_at: now });
+      recordAckMetric();
+      const current = await getThreadStateAnyStatus(sosId);
+      if (!current) return res.status(500).json({ message: "SOS thread state unavailable after acknowledge" });
+      publishSosDeltaBySosId(sosId).catch(() => {});
+      notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "sos", entity_id: current.sos_id, status: "acknowledged", assigned_unit: current.assigned_unit, sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace });
+      return res.json(buildActionResponse(current));
+    } catch (err) { console.error("Mongo SOS acknowledge error:", err); return res.status(500).json({ message: "Server error" }); }
   }
 
   const client = await pool.connect();
@@ -311,7 +333,7 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, async (req, res) 
   }
 });
 
-router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
+router.post("/admin/sos/:sosId/resolve", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
   const sosId = parsePositiveInt(req.params.sosId);
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });
@@ -327,6 +349,26 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
     return res.status(400).json({ message: note.error });
   }
   const terminalOutcome = parseResolveOutcome(note);
+
+  if (isMongoConnected()) {
+    try {
+      const thread = await SosThread.findOne({ root_event_id: sosId }).lean();
+      if (!thread) return res.status(404).json({ message: "SOS thread not found" });
+      if (thread.latest_status === "resolved") { const current = await getThreadStateAnyStatus(sosId); return res.json(buildActionResponse(current)); }
+      if (thread.latest_status !== "active") return res.status(409).json({ message: `Cannot resolve SOS in status '${thread.latest_status}'` });
+      const now = new Date();
+      await SosThread.updateOne({ public_id: thread.public_id, latest_status: "active" }, { $set: { latest_status: "resolved", resolved_at: now, terminal_status: terminalOutcome === "resolved" ? undefined : terminalOutcome, updated_at: now } });
+      const latest = await SosEvent.findOne({ thread_id: thread.public_id }).sort({ created_at: -1, public_id: -1 }).lean();
+      await SosEvent.create({ public_id: await Counter.nextPublicId("sos_events"), thread_id: thread.public_id, sos_id: sosId, user_id: thread.user_id, latitude: latest?.latitude, longitude: latest?.longitude, address: latest?.address, message: typeof note === "string" ? note : undefined, status: terminalOutcome, actor_type: "admin", actor_admin_id: Number(req.admin.adminId), event_type: "status_update", emergency_category: thread.emergency_category, created_at: now });
+      recordResolveMetric();
+      const current = await getThreadStateAnyStatus(sosId);
+      if (!current) return res.status(500).json({ message: "SOS thread state unavailable after resolve" });
+      publishSosDeltaBySosId(sosId).catch(() => {});
+      notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "sos", entity_id: current.sos_id, status: current.terminal_status ?? "resolved", assigned_unit: current.assigned_unit, sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace });
+      notifySosFriendsTerminalEvent({ owner_user_id: current.user_id, sos_id: current.sos_id, terminal_outcome: current.terminal_status ?? "resolved", sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace });
+      return res.json(buildActionResponse(current));
+    } catch (err) { console.error("Mongo SOS resolve error:", err); return res.status(500).json({ message: "Server error" }); }
+  }
 
   const client = await pool.connect();
 
@@ -477,7 +519,7 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get("/admin/sos/:sosId", requireAdminAuth, async (req, res) => {
+router.get("/admin/sos/:sosId", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
   const sosId = parsePositiveInt(req.params.sosId);
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });

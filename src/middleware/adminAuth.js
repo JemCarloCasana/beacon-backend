@@ -2,6 +2,8 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import { pool } from "../db.js";
 import { auditLog } from "../utils/auditLog.js";
+import { isMongoConnected } from "../mongo.js";
+import { AdminAccount } from "../models/Remaining.js";
 
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 
@@ -16,6 +18,10 @@ export function assertAccountActive(account) {
 }
 
 export async function getAdminAuthAccount(adminId) {
+  if (isMongoConnected()) {
+    const account = await AdminAccount.findOne({ public_id: adminId }).select({ public_id: 1, status: 1 }).lean();
+    return account ? { id: Number(account.public_id), status: account.status } : null;
+  }
   const result = await pool.query(
     `
     SELECT id, status
@@ -29,6 +35,10 @@ export async function getAdminAuthAccount(adminId) {
 }
 
 export async function getAdminPermissions(adminId) {
+  if (isMongoConnected()) {
+    const account = await AdminAccount.findOne({ public_id: adminId }).select({ permission_names: 1 }).lean();
+    return account?.permission_names ?? [];
+  }
   const result = await pool.query(
     `
     SELECT COALESCE(array_agg(DISTINCT p.name) FILTER (WHERE p.name IS NOT NULL), '{}') AS permissions
@@ -49,20 +59,26 @@ export async function requireAuth(req, res, next) {
     const header = req.headers.authorization || "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : null;
 
-    if (!token) return res.status(401).json({ message: "Missing Bearer token" });
+    if (!token) {
+      auditLog({ action: "admin.auth", target: `${req.method} ${req.path}`, outcome: "missing_token" });
+      return res.status(401).json({ message: "Missing Bearer token" });
+    }
 
     const decoded = jwt.verify(token, JWT_SECRET);
     const parsedAdminId = Number(decoded.adminId ?? decoded.sub);
     if (!Number.isInteger(parsedAdminId) || parsedAdminId <= 0) {
+      auditLog({ action: "admin.auth", target: `${req.method} ${req.path}`, outcome: "invalid_token" });
       return res.status(401).json({ message: "Invalid or expired token" });
     }
 
     const account = await getAdminAuthAccount(parsedAdminId);
     if (!account) {
+      auditLog({ action: "admin.auth", actor: parsedAdminId, target: `${req.method} ${req.path}`, outcome: "unknown_account" });
       return res.status(401).json({ message: "Invalid or expired token" });
     }
     const activeCheck = assertAccountActive(account);
     if (!activeCheck.ok) {
+      auditLog({ action: "admin.auth", actor: parsedAdminId, target: `${req.method} ${req.path}`, outcome: "deactivated" });
       return res.status(activeCheck.statusCode).json({ message: activeCheck.message });
     }
 
@@ -74,6 +90,7 @@ export async function requireAuth(req, res, next) {
 
     next();
   } catch (err) {
+    auditLog({ action: "admin.auth", target: `${req.method} ${req.path}`, outcome: "invalid_or_expired" });
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 }

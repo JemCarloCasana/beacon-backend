@@ -1,4 +1,5 @@
-﻿import { pool } from "../db.js";
+import { pool } from "../db.js";import { isMongoConnected } from "../mongo.js";
+import { UserProfile, SosThread, SosEvent, AdminAccount } from "../models/Remaining.js";
 
 const VALID_STATUSES = new Set(["active", "resolved", "acknowledged", "cancelled", "safe"]);
 const VALID_EVENT_TYPES = new Set(["report_created", "status_update", "admin_acknowledged", "note"]);
@@ -124,6 +125,27 @@ export function parseLiveListParams(query) {
 }
 
 export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, cursor = null }) {
+  if (isMongoConnected()) {
+    const filter = status === "open" ? { latest_status: "active" } : status === "cancelled" || status === "safe" ? { latest_status: "resolved", terminal_status: status } : { latest_status: status };
+    const threads = await SosThread.find(filter).sort({ updated_at: -1, root_event_id: -1 }).limit(limit + 1).lean();
+    const profiles = await UserProfile.find({ public_id: { $in: threads.map((t) => t.user_id) } }).lean();
+    const byUser = new Map(profiles.map((p) => [Number(p.public_id), p]));
+    const rows = [];
+    for (const thread of threads) {
+      const root = await SosEvent.findOne({ public_id: thread.root_event_id }).lean();
+      const latest = await SosEvent.findOne({ thread_id: thread.public_id }).sort({ created_at: -1, public_id: -1 }).lean();
+      const profile = byUser.get(Number(thread.user_id));
+      if (!profile || (!root && !latest)) continue;
+      const event = latest || root;
+      const row = withThreadAliases({ thread_id: thread.public_id, sos_id: thread.root_event_id, user_id: thread.user_id, full_name: profile.full_name, phone_number: profile.phone_number, role: profile.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event?.message ?? null, latest_latitude: event?.latitude ?? null, latest_longitude: event?.longitude ?? null, latest_address: event?.address ?? null, latest_event_at: event?.created_at ?? thread.updated_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
+      if (cursor && (new Date(row.latest_event_at) > new Date(cursor.latest_event_at) || (new Date(row.latest_event_at).getTime() === new Date(cursor.latest_event_at).getTime() && Number(row.sos_id) >= Number(cursor.sos_id)))) continue;
+      rows.push(row);
+    }
+    rows.sort((a, b) => new Date(b.latest_event_at) - new Date(a.latest_event_at) || Number(b.sos_id) - Number(a.sos_id));
+    let nextCursor = null;
+    if (rows.length > limit) { const overflow = rows[limit - 1]; rows.length = limit; nextCursor = encodeCursorPayload({ latest_event_at: overflow.latest_event_at, sos_id: overflow.sos_id }); }
+    return { rows, nextCursor };
+  }
   const values = [];
   const whereParts = [];
 
@@ -220,6 +242,15 @@ export async function getLatestThreadState(sosId) {
 }
 
 export async function getThreadStateAnyStatus(sosId) {
+  if (isMongoConnected()) {
+    const thread = await SosThread.findOne({ root_event_id: Number(sosId) }).lean();
+    if (!thread) return null;
+    const profile = await UserProfile.findOne({ public_id: thread.user_id }).lean();
+    const root = await SosEvent.findOne({ public_id: thread.root_event_id }).lean();
+    const latest = await SosEvent.findOne({ thread_id: thread.public_id }).sort({ created_at: -1, public_id: -1 }).lean();
+    const event = latest || root;
+    return withThreadAliases({ thread_id: thread.public_id, sos_id: thread.root_event_id, user_id: thread.user_id, full_name: profile?.full_name, phone_number: profile?.phone_number, role: profile?.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event?.message ?? null, latest_latitude: event?.latitude ?? null, latest_longitude: event?.longitude ?? null, latest_address: event?.address ?? null, latest_event_at: event?.created_at ?? thread.updated_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
+  }
   const result = await pool.query(
     `
     SELECT
@@ -270,6 +301,13 @@ export async function getThreadStateAnyStatus(sosId) {
 }
 
 export async function listThreadEvents(sosId) {
+  if (isMongoConnected()) {
+    const events = await SosEvent.find({ sos_id: Number(sosId) }).sort({ created_at: 1, public_id: 1 }).lean();
+    const thread = await SosThread.findOne({ root_event_id: Number(sosId) }).lean();
+    const admins = await AdminAccount.find({ public_id: { $in: events.map((e) => e.actor_admin_id).filter(Boolean) } }).lean();
+    const names = new Map(admins.map((a) => [Number(a.public_id), a.full_name]));
+    return events.map((event) => ({ id: event.public_id, thread_id: event.thread_id, sos_id: event.sos_id, user_id: event.user_id, status: event.status === "resolved" && event.actor_type === "user" && event.event_type === "status_update" && thread?.terminal_status ? thread.terminal_status : event.status, latitude: event.latitude, longitude: event.longitude, address: event.address, message: event.message, created_at: event.created_at, actor_type: event.actor_type, actor_name: event.actor_admin_id ? names.get(Number(event.actor_admin_id)) : null, actor_admin_id: event.actor_admin_id, event_type: event.event_type, emergency_category: event.emergency_category }));
+  }
   const result = await pool.query(
     `
     SELECT
@@ -307,6 +345,15 @@ export async function listThreadEvents(sosId) {
 }
 
 export async function listLiveMapRows() {
+  if (isMongoConnected()) {
+    const threads = await SosThread.find({ latest_status: "active" }).lean();
+    const rows = [];
+    for (const thread of threads) {
+      const event = await SosEvent.findOne({ thread_id: thread.public_id, latitude: { $ne: null }, longitude: { $ne: null } }).sort({ created_at: -1, public_id: -1 }).lean();
+      if (event) rows.push({ sos_id: thread.root_event_id, user_id: thread.user_id, latitude: event.latitude, longitude: event.longitude, address: event.address, message: event.message, status: thread.latest_status, created_at: event.created_at });
+    }
+    return rows;
+  }
   const result = await pool.query(
     `
     SELECT DISTINCT ON (st.user_id)

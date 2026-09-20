@@ -14,7 +14,7 @@ export function isMongoConnected() {
   return mongoose.connection?.readyState === 1;
 }
 
-export async function connectMongo() {
+export async function connectMongo({ dbName } = {}) {
   if (isMongoConnected()) {
     return mongoose.connection;
   }
@@ -25,12 +25,15 @@ export async function connectMongo() {
   }
 
   mongoose.set("strictQuery", true);
+  const selectedDbName = dbName || process.env.MONGODB_DB_NAME || process.env.MONGO_DISPOSABLE_DB_NAME || undefined;
 
   try {
     await mongoose.connect(uri, {
+      ...(selectedDbName ? { dbName: selectedDbName } : {}),
       autoIndex: true,
       maxPoolSize: 10,
-      serverSelectionTimeoutMS: 10_000,
+      serverSelectionTimeoutMS: 5_000,
+      connectTimeoutMS: 5_000,
     });
   } catch (err) {
     const redacted = redactMongoError(err);

@@ -1,6 +1,8 @@
 import express from "express";
 import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
+import { isMongoConnected } from "../mongo.js";
+import { bootstrapProfile, findProfileByUid, profileToDto, searchProfiles } from "../services/userProfiles.js";
 
 const router = express.Router();
 
@@ -124,21 +126,60 @@ function normalizeSearchQuery(rawQuery) {
     .replace(/\s+/g, " ");
 }
 
+function isValidBootstrapFullName(value) {
+  return typeof value === "string"
+    && /^[\p{L}][\p{L}\s.'-]{1,49}$/u.test(value.trim());
+}
+
 /**
  * POST /me/bootstrap
- * Ensures a Postgres profile exists for the current Firebase user.
+ * Ensures a profile exists for the current Firebase user.
  * Call after signup (best) or login if needed.
  *
  * Adds: beacon_code (generated once)
  */
 router.post("/me/bootstrap", requireAppAuth, async (req, res) => {
+  if (isMongoConnected()) {
+    const { uid, email } = req.auth;
+    const { full_name, phone_number, role } = req.body ?? {};
+
+    if (!full_name || !isValidBootstrapFullName(full_name)) {
+      return res.status(400).json({ message: "Invalid full_name" });
+    }
+
+    let normalizedPhone = null;
+    if (phone_number != null && String(phone_number).trim() !== "") {
+      const raw = String(phone_number).trim();
+      if (!PHONE_REGEX.test(raw)) return res.status(400).json({ message: "Invalid phone_number" });
+      normalizedPhone = normalizePH(raw);
+    }
+
+    const normalizedRole = normalizeAppUserRole(role);
+    if (!normalizedRole) return res.status(400).json({ message: "Invalid role" });
+
+    try {
+      const profile = await bootstrapProfile({
+        uid,
+        email,
+        fullName: full_name.trim(),
+        phoneNumber: normalizedPhone,
+        role: normalizedRole,
+      });
+      return res.json(profileToDto(profile));
+    } catch (error) {
+      console.error("BOOTSTRAP ERROR:", error?.message || error);
+      if (error?.code === 11000) return res.status(409).json({ message: "Conflict. Please try again." });
+      return res.status(500).json({ message: "Server error" });
+    }
+  }
+
   const client = await pool.connect();
   try {
     const { uid, email } = req.auth;
     const { full_name, phone_number, role } = req.body;
 
     // Validation (name)
-    if (!full_name || typeof full_name !== "string" || !/^[A-Za-z ]{2,50}$/.test(full_name.trim())) {
+    if (!full_name || !isValidBootstrapFullName(full_name)) {
       return res.status(400).json({ message: "Invalid full_name" });
     }
 
@@ -209,10 +250,16 @@ router.post("/me/bootstrap", requireAppAuth, async (req, res) => {
 
 /**
  * GET /me
- * Returns the Postgres user profile for the current Firebase user.
+ * Returns the current Firebase user's profile.
  */
 router.get("/me", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
+
+  if (isMongoConnected()) {
+    const profile = await findProfileByUid(uid);
+    if (!profile) return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
+    return res.json(profileToDto(profile));
+  }
 
   const result = await pool.query(
     `SELECT ${USER_SELECT_FIELDS}
@@ -255,6 +302,24 @@ router.patch("/me", requireAppAuth, async (req, res) => {
     normalizedProfileImageUrl = validateOptionalProfileImageUrl(profile_image_url);
   } catch (err) {
     return res.status(400).json({ message: err?.message || "Invalid request body" });
+  }
+
+  if (isMongoConnected()) {
+    const profile = await findProfileByUid(uid);
+    if (!profile) return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
+    if (full_name != null) profile.full_name = normalizedFullName;
+    if (email != null) profile.email = normalizedEmail;
+    if (phone_number != null) profile.phone_number = normalizedPhoneNumber;
+    if (role != null) profile.role = normalizedRole;
+    if (profile_image_url != null) profile.profile_image_url = normalizedProfileImageUrl;
+    profile.updated_at = new Date();
+    try {
+      await profile.save();
+    } catch (error) {
+      if (error?.code === 11000) return res.status(409).json({ message: "Conflict. Please try again." });
+      throw error;
+    }
+    return res.json(profileToDto(profile));
   }
 
   const updates = [];
@@ -316,6 +381,12 @@ router.patch("/me", requireAppAuth, async (req, res) => {
 router.get("/users", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
 
+  if (isMongoConnected()) {
+    const profile = await findProfileByUid(uid);
+    if (!profile) return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
+    return res.json(profileToDto(profile));
+  }
+
   const result = await pool.query(
     `SELECT ${USER_SELECT_FIELDS}
      FROM users
@@ -342,6 +413,12 @@ router.get("/users/search", requireAppAuth, async (req, res) => {
     return res.status(400).json({
       message: `Search query must be at least ${USER_SEARCH_MIN_QUERY_LENGTH} characters`,
     });
+  }
+
+  if (isMongoConnected()) {
+    const results = await searchProfiles({ uid, query: normalizedQuery, limit: USER_SEARCH_LIMIT });
+    if (!results) return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
+    return res.json(results);
   }
 
   const meResult = await pool.query(

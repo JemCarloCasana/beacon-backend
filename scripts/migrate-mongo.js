@@ -11,12 +11,14 @@ import { isDeepStrictEqual } from "node:util";
 const imported = new Map();
 import { pool } from "../src/db.js";
 import { connectMongo, disconnectMongo } from "../src/mongo.js";
+import { runPreflight } from "./mongo-preflight.js";
 import { AdminNotification } from "../src/models/AdminNotification.js";
 import { UserNotification } from "../src/models/UserNotification.js";
 import { Broadcast } from "../src/models/Broadcast.js";
 import { BroadcastDelivery } from "../src/models/BroadcastDelivery.js";
 import { ReportRun } from "../src/models/ReportRun.js";
 import { Counter } from "../src/models/Counter.js";
+import { UserProfile, AdminAccount, Role, Permission, EmergencyContact, FriendRequest, Friendship, Device, AdminAccessRequest } from "../src/models/Remaining.js";
 
 function normalizeMetadata(value) {
   if (value == null) return {};
@@ -67,7 +69,7 @@ export async function upsertMany(model, docs, keyFields) {
 export async function advanceCounter(key, floor) {
   const counter = await Counter.findOneAndUpdate(
     { _id: key }, { $max: { seq: Number(floor ?? 0) } },
-    { upsert: true, new: true, setDefaultsOnInsert: false }
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: false }
   );
   return counter.seq;
 }
@@ -192,6 +194,49 @@ async function importReportRuns() {
   return { pg: rows.length, ...stats, counter };
 }
 
+async function importIdentity() {
+  const users = (await pool.query("SELECT id, firebase_uid, full_name, email, phone_number, profile_image_url, role, status, beacon_code, created_at, updated_at FROM users ORDER BY id")).rows;
+  const roles = (await pool.query("SELECT id, name, description FROM roles ORDER BY id")).rows;
+  const permissions = (await pool.query("SELECT id, name, description FROM permissions ORDER BY id")).rows;
+  const grants = (await pool.query("SELECT role_id, permission_id FROM role_permissions")).rows;
+  const names = new Map(permissions.map((p) => [Number(p.id), p.name]));
+  const grantsByRole = new Map();
+  for (const grant of grants) {
+    const key = Number(grant.role_id);
+    if (!grantsByRole.has(key)) grantsByRole.set(key, []);
+    grantsByRole.get(key).push(names.get(Number(grant.permission_id)));
+  }
+  // The deployed admins table has no updated_at column; created_at is the only
+  // available account timestamp and is preserved for the MongoDB field.
+  const admins = (await pool.query("SELECT a.id, a.email, a.password_hash, a.full_name, a.role_id, a.status, a.created_at, r.name AS role FROM admins a JOIN roles r ON r.id = a.role_id ORDER BY a.id")).rows;
+  const contacts = (await pool.query("SELECT id, owner_user_id, contact_name, phone_number, relation, is_primary, created_at, updated_at FROM emergency_contacts ORDER BY id")).rows;
+  const requests = (await pool.query("SELECT id, requester_user_id, addressee_user_id, status, created_at, updated_at FROM friend_requests ORDER BY id")).rows;
+  const friendships = (await pool.query("SELECT user_id, friend_user_id, created_at FROM friendships ORDER BY user_id, friend_user_id")).rows;
+  const devices = (await pool.query("SELECT id, user_id, fcm_token, platform, created_at, updated_at FROM devices ORDER BY id")).rows;
+  const accessRequests = (await pool.query("SELECT id, personnel_id, requested_by_admin_id, status, note, decision_note, created_at, updated_at, reviewed_at, reviewed_by_admin_id FROM admin_requests ORDER BY id")).rows;
+  const summary = {};
+  summary.users = await upsertMany(UserProfile, users.map((r) => ({ public_id: Number(r.id), firebase_uid: r.firebase_uid, full_name: r.full_name, email: r.email, phone_number: r.phone_number, profile_image_url: r.profile_image_url, role: r.role, status: r.status, beacon_code: r.beacon_code, created_at: r.created_at, updated_at: r.updated_at })), ["public_id"]);
+  summary.roles = await upsertMany(Role, roles.map((r) => ({ public_id: Number(r.id), name: r.name, description: r.description })), ["public_id"]);
+  summary.permissions = await upsertMany(Permission, permissions.map((r) => ({ public_id: Number(r.id), name: r.name, description: r.description })), ["public_id"]);
+  summary.admins = await upsertMany(AdminAccount, admins.map((r) => ({ public_id: Number(r.id), email: r.email, password_hash: r.password_hash, full_name: r.full_name, role_id: Number(r.role_id), role: r.role, status: r.status, permission_names: (grantsByRole.get(Number(r.role_id)) ?? []).filter(Boolean), created_at: r.created_at, updated_at: r.created_at })), ["public_id"]);
+  summary.contacts = await upsertMany(EmergencyContact, contacts.map((r) => ({ public_id: Number(r.id), owner_user_id: Number(r.owner_user_id), contact_name: r.contact_name, phone_number: r.phone_number, relation: r.relation, is_primary: r.is_primary, created_at: r.created_at, updated_at: r.updated_at })), ["public_id"]);
+  summary.friend_requests = await upsertMany(FriendRequest, requests.map((r) => ({ public_id: Number(r.id), requester_user_id: Number(r.requester_user_id), addressee_user_id: Number(r.addressee_user_id), status: r.status, created_at: r.created_at, updated_at: r.updated_at })), ["public_id"]);
+  summary.friendships = await upsertMany(Friendship, friendships.map((r) => ({ user_id: Number(r.user_id), friend_user_id: Number(r.friend_user_id), created_at: r.created_at })), ["user_id", "friend_user_id"]);
+  summary.devices = await upsertMany(Device, devices.map((r) => ({ public_id: Number(r.id), user_id: Number(r.user_id), fcm_token: r.fcm_token, platform: r.platform, is_active: true, created_at: r.created_at, updated_at: r.updated_at })), ["public_id"]);
+  summary.admin_access_requests = await upsertMany(AdminAccessRequest, accessRequests.map((r) => ({ public_id: Number(r.id), personnel_admin_id: Number(r.personnel_id), requested_by_admin_id: Number(r.requested_by_admin_id), status: r.status, note: r.note, decision_note: r.decision_note, created_at: r.created_at, updated_at: r.updated_at, reviewed_at: r.reviewed_at, reviewed_by_admin_id: r.reviewed_by_admin_id })), ["public_id"]);
+  const maxes = [
+    ["users", users], ["roles", roles], ["permissions", permissions], ["admins", admins],
+    ["contacts", contacts], ["friend_requests", requests], ["devices", devices],
+    ["admin_access_requests", accessRequests],
+  ];
+  for (const [name, rows] of maxes) {
+    const max = rows.reduce((value, row) => Math.max(value, Number(row.id)), 0);
+    const counterKey = name === "admin_access_requests" ? "admin_requests" : name;
+    summary[name].counter = await advanceCounter(counterKey, max);
+  }
+  return summary;
+}
+
 function normalize(value) {
   if (value == null) return null;
   if (value instanceof Date) return value.toISOString();
@@ -214,7 +259,11 @@ export function compareImportedDocuments(expected, actual, keyFields) {
     if (!target) problems.push(`missing ${key}`);
     else {
       for (const field of Object.keys(source)) {
-        if (!isDeepStrictEqual(normalize(source[field]), normalize(target[field]))) {
+        const sourceValue = source[field];
+        const targetValue = target[field];
+        const nullableIdEqual = field.endsWith("_id") && sourceValue == null && targetValue == null;
+        const numericIdEqual = field.endsWith("_id") && sourceValue != null && targetValue != null && Number(sourceValue) === Number(targetValue);
+        if (!nullableIdEqual && !numericIdEqual && !isDeepStrictEqual(normalize(sourceValue), normalize(targetValue))) {
           problems.push(`${key} field ${field}`);
         }
       }
@@ -240,13 +289,24 @@ async function verify() {
     `SELECT (SELECT COALESCE(max(id),0) FROM notifications) AS a,
             (SELECT COALESCE(max(id),0) FROM user_notifications) AS b,
             (SELECT COALESCE(max(id),0) FROM broadcasts) AS c,
-            (SELECT COALESCE(max(id),0) FROM admin_report_runs) AS d`
+            (SELECT COALESCE(max(id),0) FROM admin_report_runs) AS d,
+            (SELECT COALESCE(max(id),0) FROM users) AS users,
+            (SELECT COALESCE(max(id),0) FROM roles) AS roles,
+            (SELECT COALESCE(max(id),0) FROM permissions) AS permissions,
+            (SELECT COALESCE(max(id),0) FROM admins) AS admins,
+            (SELECT COALESCE(max(id),0) FROM emergency_contacts) AS contacts,
+            (SELECT COALESCE(max(id),0) FROM friend_requests) AS friend_requests,
+            (SELECT COALESCE(max(id),0) FROM devices) AS devices,
+            (SELECT COALESCE(max(id),0) FROM admin_requests) AS admin_requests`
   );
   const expected = {
     notifications: Number(maxes.rows[0].a),
     user_notifications: Number(maxes.rows[0].b),
     broadcasts: Number(maxes.rows[0].c),
     admin_report_runs: Number(maxes.rows[0].d),
+    users: Number(maxes.rows[0].users), roles: Number(maxes.rows[0].roles), permissions: Number(maxes.rows[0].permissions),
+    admins: Number(maxes.rows[0].admins), contacts: Number(maxes.rows[0].contacts), friend_requests: Number(maxes.rows[0].friend_requests),
+    devices: Number(maxes.rows[0].devices), admin_requests: Number(maxes.rows[0].admin_requests),
   };
   for (const [key, floor] of Object.entries(expected)) {
     const doc = await Counter.findById(key).lean();
@@ -260,10 +320,12 @@ async function verify() {
 }
 
 async function main() {
-  await connectMongo();
+  await runPreflight();
+  await connectMongo({ dbName: process.env.MONGO_DISPOSABLE_DB_NAME });
   try {
-    await Promise.all([AdminNotification, UserNotification, Broadcast, BroadcastDelivery, ReportRun, Counter].map((model) => model.init()));
+    await Promise.all([AdminNotification, UserNotification, Broadcast, BroadcastDelivery, ReportRun, Counter, UserProfile, AdminAccount, Role, Permission, EmergencyContact, FriendRequest, Friendship, Device, AdminAccessRequest].map((model) => model.init()));
     const summary = {
+      identity: await importIdentity(),
       notifications: await importAdminNotifications(),
       user_notifications: await importUserNotifications(),
       broadcasts: await importBroadcasts(),
@@ -274,6 +336,16 @@ async function main() {
     const { checks, problems } = await verify();
 
     for (const [domain, stats] of Object.entries(summary)) {
+      if (domain === "identity") {
+        for (const [identityDomain, identityStats] of Object.entries(stats)) {
+          console.log(
+            `IMPORT ${identityDomain} pg=${identityStats.pg} upserted=${identityStats.upserted ?? 0} modified=${identityStats.modified ?? 0}` +
+              (identityStats.skipped ? ` skipped=${identityStats.skipped}` : "") +
+              (identityStats.counter != null ? ` counter=${identityStats.counter}` : "")
+          );
+        }
+        continue;
+      }
       console.log(
         `IMPORT ${domain} pg=${stats.pg} upserted=${stats.upserted ?? 0} modified=${stats.modified ?? 0}` +
           (stats.skipped ? ` skipped=${stats.skipped}` : "") +
@@ -300,8 +372,9 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(() => {
-    console.error("Migration import failed");
+  main().catch((error) => {
+    console.error("Migration import failed", error?.message || error);
+    if (process.env.MIGRATION_DEBUG === "1") console.error(error?.stack || error);
     process.exit(1);
   });
 }

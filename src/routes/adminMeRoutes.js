@@ -1,6 +1,8 @@
 import express from "express";
 import { pool } from "../db.js";
 import { requireAuth, getAdminPermissions } from "../middleware/adminAuth.js";
+import { isMongoConnected } from "../mongo.js";
+import { AdminAccount } from "../models/Remaining.js";
 
 const router = express.Router();
 
@@ -12,6 +14,15 @@ router.get("/admin/me", requireAuth, async (req, res) => {
   try {
     const adminId = req.admin.adminId;
     if (!adminId) return res.status(401).json({ message: "UNAUTHORIZED" });
+
+    if (isMongoConnected()) {
+      const admin = await AdminAccount.findOne({ public_id: adminId }).lean();
+      if (!admin) return res.status(401).json({ message: "UNAUTHORIZED" });
+      return res.json({
+        id: Number(admin.public_id), email: admin.email, full_name: admin.full_name,
+        role_id: admin.role_id, role: admin.role, permissions: admin.permission_names ?? [],
+      });
+    }
 
     const adminResult = await pool.query(
       `

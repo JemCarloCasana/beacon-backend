@@ -3,6 +3,8 @@ import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import { normalizeUserNotificationRow } from "../services/userNotifications.js";
 import { UserNotification } from "../models/UserNotification.js";
+import { isMongoConnected } from "../mongo.js";
+import { findProfileByUid } from "../services/userProfiles.js";
 
 const router = express.Router();
 
@@ -30,6 +32,10 @@ function toUserNotificationRow(doc) {
 }
 
 async function getCurrentUserId(firebaseUid) {
+  if (isMongoConnected()) {
+    const profile = await findProfileByUid(firebaseUid);
+    return profile ? Number(profile.public_id) : null;
+  }
   const result = await pool.query(
     `
     SELECT id

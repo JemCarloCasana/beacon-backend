@@ -2,6 +2,8 @@ import admin from "../firebaseAdmin.js";
 import { pool } from "../db.js";
 import { UserNotification } from "../models/UserNotification.js";
 import { Counter } from "../models/Counter.js";
+import { isMongoConnected } from "../mongo.js";
+import { Device, Friendship } from "../models/Remaining.js";
 
 let customSendMulticast = null;
 
@@ -411,16 +413,16 @@ export async function notifyUserLifecycleEvent(input) {
 
   let tokens = [];
   try {
-    const tokensResult = await pool.query(
-      `
-      SELECT DISTINCT fcm_token
-      FROM devices
-      WHERE user_id = $1
-        AND fcm_token IS NOT NULL
-      `,
-      [built.recipientUserId]
-    );
-    tokens = tokensResult.rows.map((row) => row.fcm_token).filter(Boolean);
+    if (isMongoConnected()) {
+      const deviceRows = await Device.find({ user_id: built.recipientUserId, is_active: true }).select({ fcm_token: 1 }).lean();
+      tokens = deviceRows.map((row) => row.fcm_token).filter(Boolean);
+    } else {
+      const tokensResult = await pool.query(
+        `SELECT DISTINCT fcm_token FROM devices WHERE user_id = $1 AND fcm_token IS NOT NULL`,
+        [built.recipientUserId]
+      );
+      tokens = tokensResult.rows.map((row) => row.fcm_token).filter(Boolean);
+    }
   } catch (err) {
     console.error("[user-notifications] failed to load device tokens:", err?.message || err, {
       ...resolvedTrace,
@@ -514,20 +516,17 @@ export async function notifySosFriendsTerminalEvent(input) {
 
   let friendUserIds = [];
   try {
-    const friendsResult = await pool.query(
-      `
-      SELECT CASE
-               WHEN user_id = $1 THEN friend_user_id
-               ELSE user_id
-             END AS friend_user_id
-      FROM friendships
-      WHERE $1 IN (user_id, friend_user_id)
-      `,
-      [ownerUserId]
-    );
-    friendUserIds = friendsResult.rows
-      .map((row) => toPositiveIntegerOrNull(row.friend_user_id))
-      .filter(Boolean);
+    if (isMongoConnected()) {
+      const friendshipRows = await Friendship.find({ $or: [{ user_id: ownerUserId }, { friend_user_id: ownerUserId }] }).lean();
+      friendUserIds = friendshipRows.map((row) => Number(row.user_id) === ownerUserId ? row.friend_user_id : row.user_id)
+        .map(toPositiveIntegerOrNull).filter(Boolean);
+    } else {
+      const friendsResult = await pool.query(
+        `SELECT CASE WHEN user_id = $1 THEN friend_user_id ELSE user_id END AS friend_user_id FROM friendships WHERE $1 IN (user_id, friend_user_id)`,
+        [ownerUserId]
+      );
+      friendUserIds = friendsResult.rows.map((row) => toPositiveIntegerOrNull(row.friend_user_id)).filter(Boolean);
+    }
   } catch (err) {
     console.error("[user-notifications] failed to load friend recipients:", err?.message || err, {
       ...trace,
@@ -554,16 +553,16 @@ export async function notifySosFriendsTerminalEvent(input) {
 
   let tokens = [];
   try {
-    const tokensResult = await pool.query(
-      `
-      SELECT DISTINCT fcm_token
-      FROM devices
-      WHERE user_id = ANY($1::bigint[])
-        AND fcm_token IS NOT NULL
-      `,
-      [friendUserIds]
-    );
-    tokens = tokensResult.rows.map((row) => row.fcm_token).filter(Boolean);
+    if (isMongoConnected()) {
+      const deviceRows = await Device.find({ user_id: { $in: friendUserIds }, is_active: true }).select({ fcm_token: 1 }).lean();
+      tokens = deviceRows.map((row) => row.fcm_token).filter(Boolean);
+    } else {
+      const tokensResult = await pool.query(
+        `SELECT DISTINCT fcm_token FROM devices WHERE user_id = ANY($1::bigint[]) AND fcm_token IS NOT NULL`,
+        [friendUserIds]
+      );
+      tokens = tokensResult.rows.map((row) => row.fcm_token).filter(Boolean);
+    }
   } catch (err) {
     console.error("[user-notifications] failed to load friend device tokens:", err?.message || err, {
       ...trace,

@@ -2,6 +2,8 @@ import { mongoose } from "../mongo.js";
 import { pool } from "../db.js";
 import { Broadcast, hasValidBroadcastAudience } from "../models/Broadcast.js";
 import { BroadcastDelivery } from "../models/BroadcastDelivery.js";
+import { isMongoConnected } from "../mongo.js";
+import { UserProfile, Role } from "../models/Remaining.js";
 
 function toPositiveIntegerOrNull(value) {
   const parsed = Number(value);
@@ -24,6 +26,10 @@ function dedupeUserIds(values) {
 
 async function resolveAudienceRecipientIds(broadcast) {
   if (broadcast.audience_type === "all") {
+    if (isMongoConnected()) {
+      const users = await UserProfile.find({ status: { $ne: "deactivated" } }).select({ public_id: 1 }).lean();
+      return dedupeUserIds(users.map((user) => user.public_id));
+    }
     const result = await pool.query(`SELECT id FROM users`);
     return dedupeUserIds(result.rows.map((row) => row.id));
   }
@@ -35,6 +41,10 @@ async function resolveAudienceRecipientIds(broadcast) {
           .map((role) => role.trim().toLowerCase())
       : [];
     if (roles.length > 0) {
+      if (isMongoConnected()) {
+        const users = await UserProfile.find({ role: { $in: roles }, status: { $ne: "deactivated" } }).select({ public_id: 1 }).lean();
+        return dedupeUserIds(users.map((user) => user.public_id));
+      }
       const result = await pool.query(`SELECT id FROM users WHERE lower(role) = ANY($1)`, [
         roles,
       ]);
@@ -45,6 +55,12 @@ async function resolveAudienceRecipientIds(broadcast) {
       ? [...new Set(broadcast.audience_role_ids.map((id) => toPositiveIntegerOrNull(id)).filter(Boolean))]
       : [];
     if (roleIds.length > 0) {
+      if (isMongoConnected()) {
+        const roleRows = await Role.find({ public_id: { $in: roleIds } }).select({ name: 1 }).lean();
+        const roleNames = roleRows.map((role) => String(role.name).toLowerCase());
+        const users = await UserProfile.find({ role: { $in: roleNames }, status: { $ne: "deactivated" } }).select({ public_id: 1 }).lean();
+        return dedupeUserIds(users.map((user) => user.public_id));
+      }
       const result = await pool.query(
         `
         SELECT u.id

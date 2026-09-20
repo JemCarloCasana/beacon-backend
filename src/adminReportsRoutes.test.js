@@ -235,9 +235,9 @@ function stubReportRunModels(t, state) {
   return { capturedFilter: () => capturedFilter };
 }
 
-test("GET /admin/reports/overview uses admin auth middleware without extra permission guard", () => {
+test("GET /admin/reports/overview uses admin auth and report permission middleware", () => {
   const stack = getRoute("/admin/reports/overview", "get");
-  assert.equal(stack.length, 2);
+  assert.equal(stack.length, 3);
 });
 
 test("GET /admin/reports/overview returns 400 on invalid range", async () => {

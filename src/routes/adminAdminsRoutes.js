@@ -7,6 +7,8 @@ import { requireAuth, requirePermission } from "../middleware/adminAuth.js"; // 
 import { AdminNotification } from "../models/AdminNotification.js";
 import { Counter } from "../models/Counter.js";
 import { auditLog } from "../utils/auditLog.js";
+import { isMongoConnected } from "../mongo.js";
+import { AdminAccount, Role, UserProfile, AdminAccessRequest } from "../models/Remaining.js";
 
 const router = express.Router();
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -153,6 +155,10 @@ function addFieldError(errors, field, message) {
 }
 
 async function getRoleIdByName(roleName) {
+  if (isMongoConnected()) {
+    const role = await Role.findOne({ name: new RegExp(`^${String(roleName).trim()}$`, "i") }).lean();
+    return role ? Number(role.public_id) : null;
+  }
   const result = await pool.query(
     `
     SELECT id
@@ -290,6 +296,12 @@ router.get(
         return res.status(400).json({ message: "Invalid status filter" });
       }
 
+      if (isMongoConnected()) {
+        const filter = statusFilter === "all" ? {} : { status: statusFilter };
+        const rows = await AdminAccount.find(filter).sort({ created_at: -1 }).lean();
+        return res.json(rows.map((row) => ({ id: row.public_id, email: row.email, full_name: row.full_name, role_id: row.role_id, created_at: row.created_at, status: row.status })));
+      }
+
       const whereClause = statusFilter === "all" ? "" : "WHERE status = $1";
       const values = statusFilter === "all" ? [] : [statusFilter];
       const result = await pool.query(
@@ -331,6 +343,12 @@ router.post(
       }
 
       const passwordHash = await bcrypt.hash(normalized.password, 12);
+      if (isMongoConnected()) {
+        const existing = await AdminAccount.findOne({ email: normalized.email }).lean();
+        if (existing) return res.status(409).json({ message: "Email already exists" });
+        const created = await AdminAccount.create({ public_id: await Counter.nextPublicId("admins"), email: normalized.email, password_hash: passwordHash, full_name: normalized.full_name, role_id: roleId, role: normalized.role, permission_names: [], status: "active", created_at: new Date(), updated_at: new Date() });
+        return res.status(201).json({ id: created.public_id, email: created.email, full_name: created.full_name, role_id: created.role_id, created_at: created.created_at, status: created.status, role: normalized.role });
+      }
       const result = await pool.query(
         `
         INSERT INTO admins (email, password_hash, full_name, role_id)
@@ -382,6 +400,12 @@ router.get(
         );
       }
 
+      if (isMongoConnected()) {
+        const user = await UserProfile.findOne({ public_id: userId }).lean();
+        if (!user) return res.status(404).json({ message: "User not found" });
+        return res.json({ id: user.public_id, firebase_uid: user.firebase_uid, email: user.email, full_name: user.full_name, phone_number: user.phone_number, role: user.role, profile_image_url: user.profile_image_url, status: user.status });
+      }
+
       const result = await pool.query(
         `
         SELECT ${ADMIN_USER_RETURN_FIELDS}
@@ -426,6 +450,14 @@ router.patch(
       const { normalized, errors } = validateAdminUserPatchPayload(req.body);
       if (Object.keys(errors).length > 0) {
         return res.status(422).json(buildValidationError(errors));
+      }
+
+      if (isMongoConnected()) {
+        const current = await UserProfile.findOne({ public_id: userId }).lean();
+        if (!current) return res.status(404).json({ message: "User not found" });
+        if (normalized.email && normalized.email !== current.email && await UserProfile.exists({ email: normalized.email })) return res.status(409).json({ message: "Email already exists" });
+        const updated = await UserProfile.findOneAndUpdate({ public_id: userId }, { $set: { ...normalized, updated_at: new Date() } }, { returnDocument: "after" }).lean();
+        return res.json({ id: updated.public_id, firebase_uid: updated.firebase_uid, email: updated.email, full_name: updated.full_name, phone_number: updated.phone_number, role: updated.role, profile_image_url: updated.profile_image_url, status: updated.status });
       }
 
       // Compatibility bridge: frontend uses admin/personnel IDs from /admin/admins.
@@ -558,6 +590,14 @@ router.patch(
         return res.status(422).json(buildValidationError(errors));
       }
 
+      if (isMongoConnected()) {
+        const current = await AdminAccount.findOne({ public_id: adminId }).lean();
+        if (!current) return res.status(404).json({ message: "Admin not found" });
+        if (normalized.email && normalized.email !== current.email && await AdminAccount.exists({ email: normalized.email })) return res.status(409).json({ message: "Email already exists" });
+        const updated = await AdminAccount.findOneAndUpdate({ public_id: adminId }, { $set: { ...normalized, updated_at: new Date() } }, { returnDocument: "after" }).lean();
+        return res.json({ id: updated.public_id, email: updated.email, full_name: updated.full_name, role_id: updated.role_id, created_at: updated.created_at });
+      }
+
       const updates = [];
       const values = [];
 
@@ -626,9 +666,15 @@ router.delete(
 router.get(
   "/admin/admin-requests",
   requireAuth,
-  requirePermission("manage_admins"),
+      requirePermission("manage_admins"),
   async (req, res) => {
     try {
+      if (isMongoConnected()) {
+        const requests = await AdminAccessRequest.find({}).sort({ created_at: -1 }).lean();
+        const personnel = await AdminAccount.find({ public_id: { $in: requests.map((row) => row.personnel_admin_id) } }).lean();
+        const byId = new Map(personnel.map((row) => [Number(row.public_id), row]));
+        return res.json(requests.map((row) => ({ id: row.public_id, personnel_id: row.personnel_admin_id, requested_by_admin_id: row.requested_by_admin_id, status: row.status, note: row.note, decision_note: row.decision_note, created_at: row.created_at, reviewed_at: row.reviewed_at, reviewed_by_admin_id: row.reviewed_by_admin_id, personnel_name: byId.get(Number(row.personnel_admin_id))?.full_name ?? null, personnel_email: byId.get(Number(row.personnel_admin_id))?.email ?? null })));
+      }
       const result = await pool.query(
         `
         SELECT
@@ -689,7 +735,7 @@ router.post(
   requireAuth,
   requirePermission("manage_admins"),
   async (req, res) => {
-    const client = await pool.connect();
+    let client = null;
     try {
       const personnelId = Number(req.body?.personnel_id);
       const requestedByAdminId = Number(req.admin?.adminId);
@@ -705,6 +751,17 @@ router.post(
         return res.status(401).json({ message: "Unauthorized" });
       }
 
+      if (isMongoConnected()) {
+        const personnel = await AdminAccount.findOne({ public_id: personnelId }).lean();
+        if (!personnel) return res.status(404).json({ message: "Personnel not found" });
+        if (personnel.role !== "personnel") return res.status(409).json({ message: "Only personnel accounts can be requested" });
+        if (await AdminAccessRequest.exists({ personnel_admin_id: personnelId, status: "pending" })) return res.status(409).json({ message: "A pending request already exists for this personnel" });
+        const created = await AdminAccessRequest.create({ public_id: await Counter.nextPublicId("admin_requests"), personnel_admin_id: personnelId, requested_by_admin_id: requestedByAdminId, status: "pending", note, created_at: new Date(), updated_at: new Date() });
+        try { await AdminNotification.create({ public_id: await Counter.nextPublicId("notifications"), recipient_admin_id: personnelId, type: "admin_request", title: "Admin Access Request", message: "You have received an admin access request.", metadata: { admin_request_id: created.public_id, requested_by_admin_id: requestedByAdminId }, is_read: false, created_at: new Date() }); } catch (notifyErr) { console.error("Mongo admin request notification error:", notifyErr?.message || notifyErr); }
+        return res.status(201).json({ message: "Admin request sent", request: { id: created.public_id, personnel_id: created.personnel_admin_id, requested_by_admin_id: created.requested_by_admin_id, status: created.status, note: created.note, created_at: created.created_at } });
+      }
+
+      client = await pool.connect();
       await client.query("BEGIN");
 
       const personnelResult = await client.query(
@@ -793,7 +850,7 @@ router.post(
       console.error("POST /admin/admin-requests error:", err);
       return res.status(500).json({ message: "Server error" });
     } finally {
-      client.release();
+      client?.release();
     }
   }
 );
@@ -806,7 +863,7 @@ router.patch(
   "/admin/admin-requests/:id/accept",
   requireAuth,
   async (req, res) => {
-    const client = await pool.connect();
+    let client = null;
     try {
       const requestId = Number(req.params.id);
       const decidedByAdminId = Number(req.admin?.adminId);
@@ -822,6 +879,21 @@ router.patch(
         return res.status(401).json({ message: "Unauthorized" });
       }
 
+      if (isMongoConnected()) {
+        const current = await AdminAccessRequest.findOne({ public_id: requestId }).lean();
+        if (!current) return res.status(404).json({ message: "Admin request not found" });
+        if (current.status !== "pending") return res.status(409).json({ message: `Admin request ${requestId} is already ${current.status}` });
+        if (decidedByAdminId !== Number(current.personnel_admin_id) && !(await getAdminPermissions(decidedByAdminId)).includes("manage_admins")) return res.status(403).json({ message: "Insufficient permissions" });
+        const adminRole = await Role.findOne({ name: /^admin$/i }).lean();
+        if (!adminRole) return res.status(500).json({ message: 'Role "admin" not found in roles table' });
+        const promoted = await AdminAccount.findOneAndUpdate({ public_id: current.personnel_admin_id, role: "personnel" }, { $set: { role: "admin", role_id: adminRole.public_id, updated_at: new Date() } }, { returnDocument: "after" }).lean();
+        if (!promoted) return res.status(404).json({ message: `Personnel/admin record ${current.personnel_admin_id} not found` });
+        const updated = await AdminAccessRequest.findOneAndUpdate({ public_id: requestId, status: "pending" }, { $set: { status: "approved", decision_note: note ?? current.decision_note, reviewed_at: new Date(), reviewed_by_admin_id: decidedByAdminId, updated_at: new Date() } }, { returnDocument: "after" }).lean();
+        auditLog({ action: "admin.admin_request_approved", actor: decidedByAdminId, target: `admin_request:${requestId}`, outcome: "approved" });
+        return res.json({ message: "Admin request approved", request: { request_id: updated.public_id, personnel_id: updated.personnel_admin_id, status: updated.status } });
+      }
+
+      client = await pool.connect();
       await client.query("BEGIN");
 
       const lockResult = await client.query(
@@ -920,7 +992,7 @@ router.patch(
       console.error("PATCH /admin/admin-requests/:id/accept error:", err);
       return res.status(500).json({ message: "Server error" });
     } finally {
-      client.release();
+      client?.release();
     }
   }
 );
@@ -933,7 +1005,7 @@ router.patch(
   "/admin/admin-requests/:id/reject",
   requireAuth,
   async (req, res) => {
-    const client = await pool.connect();
+    let client = null;
     try {
       const requestId = Number(req.params.id);
       const decidedByAdminId = Number(req.admin?.adminId);
@@ -949,6 +1021,17 @@ router.patch(
         return res.status(401).json({ message: "Unauthorized" });
       }
 
+      if (isMongoConnected()) {
+        const current = await AdminAccessRequest.findOne({ public_id: requestId }).lean();
+        if (!current) return res.status(404).json({ message: "Admin request not found" });
+        if (current.status !== "pending") return res.status(409).json({ message: `Admin request ${requestId} is already ${current.status}` });
+        if (decidedByAdminId !== Number(current.personnel_admin_id) && !(await getAdminPermissions(decidedByAdminId)).includes("manage_admins")) return res.status(403).json({ message: "Insufficient permissions" });
+        const updated = await AdminAccessRequest.findOneAndUpdate({ public_id: requestId, status: "pending" }, { $set: { status: "rejected", decision_note: note, reviewed_at: new Date(), reviewed_by_admin_id: decidedByAdminId, updated_at: new Date() } }, { returnDocument: "after" }).lean();
+        auditLog({ action: "admin.admin_request_rejected", actor: decidedByAdminId, target: `admin_request:${requestId}`, outcome: "rejected" });
+        return res.json({ message: "Admin request rejected", request: { request_id: updated.public_id, personnel_id: updated.personnel_admin_id, status: updated.status } });
+      }
+
+      client = await pool.connect();
       await client.query("BEGIN");
 
       const lockResult = await client.query(
@@ -1016,7 +1099,7 @@ router.patch(
       console.error("PATCH /admin/admin-requests/:id/reject error:", err);
       return res.status(500).json({ message: "Server error" });
     } finally {
-      client.release();
+      client?.release();
     }
   }
 );

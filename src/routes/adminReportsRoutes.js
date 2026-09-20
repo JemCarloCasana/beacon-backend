@@ -1,9 +1,11 @@
 import express from "express";
 import { pool } from "../db.js";
-import { requireAdminAuth } from "../middleware/adminAuth.js";
+import { requireAdminAuth, requirePermission } from "../middleware/adminAuth.js";
 import { ReportRun } from "../models/ReportRun.js";
 import { Counter } from "../models/Counter.js";
 import { auditLog } from "../utils/auditLog.js";
+import { isMongoConnected } from "../mongo.js";
+import { IncidentReport, SosThread, SosEvent } from "../models/Remaining.js";
 
 const router = express.Router();
 
@@ -191,6 +193,37 @@ async function getCardsMetadata(timezone) {
 async function buildAnalytics({ range, timezone, now = new Date() }) {
   const windowStart = getWindowStart(range, now);
   const granularity = getGranularity(range);
+  if (isMongoConnected()) {
+    const incidents = await IncidentReport.find({ created_at: { $gte: windowStart, $lte: now } }).lean();
+    const threads = await SosThread.find({ created_at: { $gte: windowStart, $lte: now } }).lean();
+    const events = await SosEvent.find({ sos_id: { $in: threads.map((t) => t.root_event_id) } }).sort({ created_at: 1, public_id: 1 }).lean();
+    const eventBySos = new Map();
+    for (const event of events) eventBySos.set(Number(event.sos_id), event);
+    const statusCounts = new Map(); const priorityCounts = new Map(); const categoryCounts = new Map(); const sosCategoryCounts = new Map();
+    const incidentTrend = new Map(); const sosTrend = new Map(); const responseTrend = new Map();
+    let responseTotal = 0; let responseCount = 0; let resolutionTotal = 0; let resolutionCount = 0;
+    const addTrend = (map, date, values = 1) => { const key = formatBucketKey(shiftToManila(new Date(date)), granularity); const current = map.get(key) || (typeof values === "object" ? { ...values } : 0); map.set(key, typeof values === "object" ? values : current + values); };
+    for (const incident of incidents) {
+      statusCounts.set(incident.status, (statusCounts.get(incident.status) || 0) + 1);
+      priorityCounts.set(incident.priority, (priorityCounts.get(incident.priority) || 0) + 1);
+      categoryCounts.set(incident.incident_type, (categoryCounts.get(incident.incident_type) || 0) + 1);
+      addTrend(incidentTrend, incident.created_at, 1);
+      const response = incident.dispatched_at ? new Date(incident.dispatched_at) - new Date(incident.created_at) : 0;
+      const resolution = incident.resolved_at ? new Date(incident.resolved_at) - new Date(incident.created_at) : 0;
+      if (response > 0) { responseTotal += response / 1000; responseCount++; }
+      if (resolution > 0) { resolutionTotal += resolution / 1000; resolutionCount++; }
+      const bucket = formatBucketKey(shiftToManila(new Date(incident.created_at)), granularity);
+      const value = responseTrend.get(bucket) || { avg_response_seconds: 0, avg_resolution_seconds: 0, response_count: 0, resolution_count: 0 };
+      if (response > 0) { value.avg_response_seconds += response / 1000; value.response_count++; }
+      if (resolution > 0) { value.avg_resolution_seconds += resolution / 1000; value.resolution_count++; }
+      responseTrend.set(bucket, value);
+    }
+    for (const thread of threads) { const event = eventBySos.get(Number(thread.root_event_id)); const date = event?.created_at || thread.created_at; addTrend(sosTrend, date, 1); sosCategoryCounts.set(thread.emergency_category, (sosCategoryCounts.get(thread.emergency_category) || 0) + 1); }
+    const bucketKeys = generateBucketKeys({ start: windowStart, end: now, granularity });
+    const ordered = (map) => [...map.entries()].map(([label, value]) => ({ label, value }));
+    const statusOrder = ["pending", "dispatched", "in_progress", "resolved"];
+    return { generated_at: now.toISOString(), range, timezone, kpis: { total_incidents: incidents.length, active_incidents: incidents.filter((i) => ["pending", "dispatched", "in_progress"].includes(i.status)).length, resolved_incidents: incidents.filter((i) => i.status === "resolved").length, active_sos: threads.filter((t) => t.latest_status === "active").length, avg_response_seconds: responseCount ? Math.round(responseTotal / responseCount) : 0, avg_resolution_seconds: resolutionCount ? Math.round(resolutionTotal / resolutionCount) : 0 }, charts: { incidents_by_status: statusOrder.filter((label) => statusCounts.has(label)).map((label) => ({ label, value: statusCounts.get(label) })), incidents_by_priority: buildPriorityBuckets(ordered(priorityCounts)), incidents_trend: bucketKeys.map((bucket) => ({ bucket, incidents: incidentTrend.get(bucket) || 0, sos: sosTrend.get(bucket) || 0 })), response_time_trend: bucketKeys.map((bucket) => { const v = responseTrend.get(bucket); return { bucket, avg_response_seconds: v?.response_count ? Math.round(v.avg_response_seconds / v.response_count) : 0, avg_resolution_seconds: v?.resolution_count ? Math.round(v.avg_resolution_seconds / v.resolution_count) : 0 }; }), incident_categories_frequency: [...categoryCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([label, value]) => ({ label, value })), sos_categories_frequency: [...sosCategoryCounts.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))).map(([label, value]) => ({ label: formatSosCategoryLabel(label), value })) } };
+  }
   const bucketExpr =
     granularity === "hour"
       ? "to_char(date_trunc('hour', created_at AT TIME ZONE 'Asia/Manila'), 'YYYY-MM-DD HH24:00')"
@@ -407,6 +440,13 @@ async function buildAnalytics({ range, timezone, now = new Date() }) {
 
 async function getCsvDetails({ range, now = new Date() }) {
   const windowStart = getWindowStart(range, now);
+  if (isMongoConnected()) {
+    const incidents = await IncidentReport.find({ created_at: { $gte: windowStart, $lte: now } }).sort({ created_at: -1, public_id: -1 }).lean();
+    const threads = await SosThread.find({ created_at: { $gte: windowStart, $lte: now } }).sort({ created_at: -1, root_event_id: -1 }).lean();
+    const roots = await SosEvent.find({ public_id: { $in: threads.map((thread) => thread.root_event_id) } }).lean();
+    const rootById = new Map(roots.map((event) => [Number(event.public_id), event]));
+    return { incidents: incidents.map((row) => ({ id: row.public_id, incident_type: row.incident_type ?? "", status: row.status ?? "", priority: row.priority ?? "", assigned_department: row.assigned_department ?? "", address: row.address ?? "", created_at: toIso(row.created_at) ?? "", dispatched_at: toIso(row.dispatched_at) ?? "", resolved_at: toIso(row.resolved_at) ?? "" })), sos: threads.map((row) => { const root = rootById.get(Number(row.root_event_id)); return { sos_id: row.root_event_id, latest_status: row.latest_status ?? "", emergency_category: formatSosCategoryLabel(row.emergency_category), assigned_unit: row.assigned_unit ?? "", terminal_status: row.terminal_status ?? "", address: root?.address ?? "", opened_at: toIso(root?.created_at ?? row.created_at) ?? "", resolved_at: toIso(row.resolved_at) ?? "" }; }) };
+  }
   const incidentResult = await pool.query(
     `
     SELECT
@@ -578,7 +618,7 @@ function buildCsvPayload(reportPayload, details) {
   return `${toCsv(rows)}\n`;
 }
 
-router.get("/admin/reports/overview", requireAdminAuth, async (req, res) => {
+router.get("/admin/reports/overview", requireAdminAuth, requirePermission("manage_reports"), async (req, res) => {
   try {
     const range = parseRange(req.query?.range);
     if (!range) {
@@ -607,7 +647,7 @@ router.get("/admin/reports/overview", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.post("/admin/reports/generate", requireAdminAuth, async (req, res) => {
+router.post("/admin/reports/generate", requireAdminAuth, requirePermission("manage_reports"), async (req, res) => {
   try {
     const reportKey = parseReportKey(req.body?.report_key);
     if (!reportKey) {
@@ -657,7 +697,7 @@ router.post("/admin/reports/generate", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get("/admin/reports/export.csv", requireAdminAuth, async (req, res) => {
+router.get("/admin/reports/export.csv", requireAdminAuth, requirePermission("manage_reports"), async (req, res) => {
   try {
     const range = parseRange(req.query?.range);
     if (!range) {

@@ -1,5 +1,7 @@
 import express from "express";
 import { pool } from "../db.js";
+import { isMongoConnected } from "../mongo.js";
+import { findProfileByUid } from "../services/userProfiles.js";
 import { requireAdminAuth, requirePermission, getAdminPermissions } from "../middleware/adminAuth.js";
 import { requireAuth as requireFirebaseAuth } from "../middleware/requireAuth.js";
 import { sendBroadcastPush } from "../services/fcm.js";
@@ -90,6 +92,15 @@ async function resolveAuthenticatedInboxUserId(req, res) {
   if (!uid) {
     res.status(401).json({ message: "Invalid token: missing uid claim" });
     return null;
+  }
+
+  if (isMongoConnected()) {
+    const profile = await findProfileByUid(uid);
+    if (!profile) {
+      res.status(404).json({ message: "User account not found. Call /me/bootstrap first." });
+      return null;
+    }
+    return Number(profile.public_id);
   }
 
   const userResult = await pool.query(
@@ -287,6 +298,9 @@ router.get("/admin/broadcasts", requireAdminAuth, async (req, res) => {
     }
 
     const sent = req.query?.sent;
+    if (sent != null && sent !== "0" && sent !== "1") {
+      return res.status(400).json({ message: "Invalid sent filter" });
+    }
     const filter = {};
 
     if (sent === "1") {
@@ -394,7 +408,10 @@ router.patch(
         return res.status(400).json({ message: "Invalid broadcast id" });
       }
 
-      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const body = req.body;
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return res.status(400).json({ message: "Request body must be an object" });
+      }
       const allowedFields = new Set([
         "title",
         "body",
@@ -407,6 +424,9 @@ router.patch(
         if (!allowedFields.has(key)) {
           return res.status(400).json({ message: `Field is not allowed: ${key}` });
         }
+      }
+      if (Object.keys(body).length === 0) {
+        return res.status(400).json({ message: "No updatable fields provided" });
       }
 
       const existing = await Broadcast.findOne({ public_id: broadcastId }).lean();
@@ -551,6 +571,13 @@ router.delete(
         [req.admin.adminId]
       );
       if (result.rows[0]?.role !== "admin") {
+        auditLog({
+          action: "broadcast.deleted",
+          actor: req.admin?.adminId,
+          target: `broadcast:${req.params.id}`,
+          outcome: "denied",
+          details: { reason: "admin_role_required" },
+        });
         return res.status(403).json({ message: "Insufficient permissions" });
       }
       return next();

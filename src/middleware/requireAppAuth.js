@@ -1,6 +1,8 @@
 import { pool } from "../db.js";
 import { requireAuth } from "./requireAuth.js";
 import { chooseBootstrapFullName } from "../utils/userNameFallbacks.js";
+import { isMongoConnected } from "../mongo.js";
+import { upsertProfileFromToken } from "../services/userProfiles.js";
 
 function buildBootstrapProfile(decoded, existingName = null) {
   const email = typeof decoded.email === "string" && decoded.email.trim()
@@ -63,6 +65,11 @@ async function upsertUserFromToken(decoded) {
 export async function requireAppAuth(req, res, next) {
   return requireAuth(req, res, async () => {
     try {
+      if (isMongoConnected()) {
+        const profile = await upsertProfileFromToken(req.auth.claims);
+        req.userProfile = profile;
+        return next();
+      }
       await upsertUserFromToken(req.auth.claims);
       return next();
     } catch (err) {
