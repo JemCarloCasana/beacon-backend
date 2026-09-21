@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import router from "./routes/incidentRoutes.js";
-import { pool } from "./db.js";
+import router from "../src/routes/incidentRoutes.js";
+import { pool } from "../src/db.js";
 
 function getRoute(path, method) {
   const layer = router.stack.find(

@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import router from "./routes/adminAdminsRoutes.js";
-import { pool } from "./db.js";
+import router from "../src/routes/adminAdminsRoutes.js";
+import { pool } from "../src/db.js";
 
 function findRouteLayer(path, method) {
   const layer = router.stack.find(

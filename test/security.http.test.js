@@ -6,10 +6,10 @@ process.env.WRITE_RATE_LIMIT_WINDOW_MS = "60000";
 process.env.WRITE_RATE_LIMIT_MAX = "3";
 
 const { app } = await import("../server.js");
-const { pool } = await import("./db.js");
-const { Broadcast } = await import("./models/Broadcast.js");
-const { BroadcastDelivery } = await import("./models/BroadcastDelivery.js");
-const { auditLog, redactAuditValue } = await import("./utils/auditLog.js");
+const { pool } = await import("../src/db.js");
+const { Broadcast } = await import("../src/models/Broadcast.js");
+const { BroadcastDelivery } = await import("../src/models/BroadcastDelivery.js");
+const { auditLog, redactAuditValue } = await import("../src/utils/auditLog.js");
 
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 assert.ok(JWT_SECRET, "ADMIN_JWT_SECRET must be configured for security tests");

@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import router from "./routes/adminSosRoutes.js";
-import { pool } from "./db.js";
-import { setUserNotificationMulticastSenderForTests } from "./services/userNotifications.js";
-import { UserNotification } from "./models/UserNotification.js";
-import { Counter } from "./models/Counter.js";
+import router from "../src/routes/adminSosRoutes.js";
+import { pool } from "../src/db.js";
+import { setUserNotificationMulticastSenderForTests } from "../src/services/userNotifications.js";
+import { UserNotification } from "../src/models/UserNotification.js";
+import { Counter } from "../src/models/Counter.js";
 
 function getRoute(path, method) {
   const layer = router.stack.find(

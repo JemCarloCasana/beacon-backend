@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import router from "./routes/broadcastRoutes.js";
-import { pool } from "./db.js";
-import { Broadcast } from "./models/Broadcast.js";
-import { BroadcastDelivery } from "./models/BroadcastDelivery.js";
+import router from "../src/routes/broadcastRoutes.js";
+import { pool } from "../src/db.js";
+import { Broadcast } from "../src/models/Broadcast.js";
+import { BroadcastDelivery } from "../src/models/BroadcastDelivery.js";
 
 function getRoute(path, method) {
   const layer = router.stack.find(

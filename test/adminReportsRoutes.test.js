@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import router from "./routes/adminReportsRoutes.js";
-import { pool } from "./db.js";
-import { ReportRun } from "./models/ReportRun.js";
-import { Counter } from "./models/Counter.js";
+import router from "../src/routes/adminReportsRoutes.js";
+import { pool } from "../src/db.js";
+import { ReportRun } from "../src/models/ReportRun.js";
+import { Counter } from "../src/models/Counter.js";
 
 function getRoute(path, method) {
   const layer = router.stack.find(

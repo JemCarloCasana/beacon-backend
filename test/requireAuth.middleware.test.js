@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { requireAuth, setVerifyIdTokenForTests } from "./middleware/requireAuth.js";
-import { requireAppAuth } from "./middleware/requireAppAuth.js";
-import { pool } from "./db.js";
+import { requireAuth, setVerifyIdTokenForTests } from "../src/middleware/requireAuth.js";
+import { requireAppAuth } from "../src/middleware/requireAppAuth.js";
+import { pool } from "../src/db.js";
 
 function createRes() {
   return {

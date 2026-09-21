@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import router from "./routes/meRoutes.js";
-import { pool } from "./db.js";
-import { requireAuth } from "./middleware/requireAuth.js";
+import router from "../src/routes/meRoutes.js";
+import { pool } from "../src/db.js";
+import { requireAuth } from "../src/middleware/requireAuth.js";
 
 function findRouteHandler(path, method) {
   const layer = router.stack.find(

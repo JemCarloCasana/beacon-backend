@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   UserProfile, AdminAccount, EmergencyContact, FriendRequest, Friendship, Device,
   SosThread, SosEvent, IncidentReport, IncidentEvidence, AdminAccessRequest,
-} from "./models/Remaining.js";
+} from "../src/models/Remaining.js";
 
 test("remaining Mongo models expose positive public IDs and reject invalid enums", () => {
   const invalidUser = new UserProfile({ public_id: 0, firebase_uid: "uid", full_name: "User", email: "u@example.com", role: "admin" });

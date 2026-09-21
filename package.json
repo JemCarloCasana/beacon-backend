@@ -16,7 +16,7 @@
     "mongo:import": "node scripts/migrate-mongo.js",
     "mongo:preflight": "node scripts/mongo-preflight.js",
     "mongo:import:identity": "node scripts/migrate-identity-mongo.js",
-    "test": "node src/remainingModels.test.js && node src/adminAuthRoutes.contract.test.js && node src/meRoutes.patch.test.js && node src/meRoutes.bootstrap.test.js && node src/adminUsers.patch.test.js && node src/adminAdmins.patch.test.js && node src/broadcastRoutes.auth.test.js && node src/broadcastRoutes.create.test.js && node src/requireAuth.middleware.test.js && node src/friendRoutes.test.js && node src/adminSosRoutes.liveops.test.js && node src/incidentRoutes.admin.test.js && node src/sosRoutes.test.js && node src/adminReportsRoutes.test.js && node src/userNotifications.test.js && node src/phase1-5.regression.test.js && node src/security.http.test.js"
+    "test": "node test/remainingModels.test.js && node test/adminAuthRoutes.contract.test.js && node test/meRoutes.patch.test.js && node test/meRoutes.bootstrap.test.js && node test/adminUsers.patch.test.js && node test/adminAdmins.patch.test.js && node test/broadcastRoutes.auth.test.js && node test/broadcastRoutes.create.test.js && node test/requireAuth.middleware.test.js && node test/friendRoutes.test.js && node test/adminSosRoutes.liveops.test.js && node test/incidentRoutes.admin.test.js && node test/sosRoutes.test.js && node test/adminReportsRoutes.test.js && node test/userNotifications.test.js && node test/phase1-5.regression.test.js && node test/security.http.test.js"
   },
   "keywords": [
     "beacon",

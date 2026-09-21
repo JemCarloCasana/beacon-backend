@@ -4,14 +4,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
-import { pool } from "./db.js";
-import { Broadcast } from "./models/Broadcast.js";
-import { BroadcastDelivery } from "./models/BroadcastDelivery.js";
-import { AdminNotification } from "./models/AdminNotification.js";
-import { UserNotification } from "./models/UserNotification.js";
-import { ReportRun } from "./models/ReportRun.js";
-import { Counter } from "./models/Counter.js";
-import { sendBroadcastByPublicId } from "./services/broadcastSend.js";
+import { pool } from "../src/db.js";
+import { Broadcast } from "../src/models/Broadcast.js";
+import { BroadcastDelivery } from "../src/models/BroadcastDelivery.js";
+import { AdminNotification } from "../src/models/AdminNotification.js";
+import { UserNotification } from "../src/models/UserNotification.js";
+import { ReportRun } from "../src/models/ReportRun.js";
+import { Counter } from "../src/models/Counter.js";
+import { sendBroadcastByPublicId } from "../src/services/broadcastSend.js";
 import { upsertMany, advanceCounter, compareImportedDocuments } from "../scripts/migrate-mongo.js";
 
 test("isolated Atlas migration and transaction checks", { skip: process.env.BEACON_RUN_MONGO_TESTS !== "1" }, async (t) => {

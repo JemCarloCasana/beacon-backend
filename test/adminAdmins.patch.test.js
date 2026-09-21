@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import router from "./routes/adminAdminsRoutes.js";
-import { pool } from "./db.js";
-import { AdminNotification } from "./models/AdminNotification.js";
-import { Counter } from "./models/Counter.js";
+import router from "../src/routes/adminAdminsRoutes.js";
+import { pool } from "../src/db.js";
+import { AdminNotification } from "../src/models/AdminNotification.js";
+import { Counter } from "../src/models/Counter.js";
 
 function findRouteLayer(path, method) {
   const layer = router.stack.find(

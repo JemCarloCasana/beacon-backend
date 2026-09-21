@@ -1,19 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import admin from "./firebaseAdmin.js";
-import { pool } from "./db.js";
-import notificationRouter from "./routes/notificationRoutes.js";
-import incidentRouter from "./routes/incidentRoutes.js";
-import adminSosRouter from "./routes/adminSosRoutes.js";
+import admin from "../src/firebaseAdmin.js";
+import { pool } from "../src/db.js";
+import notificationRouter from "../src/routes/notificationRoutes.js";
+import incidentRouter from "../src/routes/incidentRoutes.js";
+import adminSosRouter from "../src/routes/adminSosRoutes.js";
 import {
   buildUserLifecycleNotification,
   notifySosFriendsTerminalEvent,
   notifyUserLifecycleEvent,
   setUserNotificationMulticastSenderForTests,
-} from "./services/userNotifications.js";
-import { UserNotification } from "./models/UserNotification.js";
-import { Counter } from "./models/Counter.js";
+} from "../src/services/userNotifications.js";
+import { UserNotification } from "../src/models/UserNotification.js";
+import { Counter } from "../src/models/Counter.js";
 
 function getRoute(router, path, method) {
   const layer = router.stack.find(

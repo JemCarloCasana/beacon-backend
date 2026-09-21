@@ -4,13 +4,13 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import jwt from "jsonwebtoken";
 import { getMessaging } from "firebase-admin/messaging";
-import router from "./routes/broadcastRoutes.js";
-import { pool } from "./db.js";
-import { Broadcast } from "./models/Broadcast.js";
-import { BroadcastDelivery } from "./models/BroadcastDelivery.js";
-import { Counter } from "./models/Counter.js";
-import { sendBroadcastPush } from "./services/fcm.js";
-import { connectMongo } from "./mongo.js";
+import router from "../src/routes/broadcastRoutes.js";
+import { pool } from "../src/db.js";
+import { Broadcast } from "../src/models/Broadcast.js";
+import { BroadcastDelivery } from "../src/models/BroadcastDelivery.js";
+import { Counter } from "../src/models/Counter.js";
+import { sendBroadcastPush } from "../src/services/fcm.js";
+import { connectMongo } from "../src/mongo.js";
 import { upsertMany, advanceCounter, compareImportedDocuments } from "../scripts/migrate-mongo.js";
 
 const route = (method, path = "/admin/broadcasts/:id") => router.stack.find(

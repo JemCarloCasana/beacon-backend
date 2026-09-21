@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import broadcastRouter from "./routes/broadcastRoutes.js";
-import adminBroadcastRouter from "./routes/adminBroadcastRoutes.js";
-import { pool } from "./db.js";
-import { mongoose } from "./mongo.js";
-import { Broadcast } from "./models/Broadcast.js";
-import { BroadcastDelivery } from "./models/BroadcastDelivery.js";
-import { Counter } from "./models/Counter.js";
+import broadcastRouter from "../src/routes/broadcastRoutes.js";
+import adminBroadcastRouter from "../src/routes/adminBroadcastRoutes.js";
+import { pool } from "../src/db.js";
+import { mongoose } from "../src/mongo.js";
+import { Broadcast } from "../src/models/Broadcast.js";
+import { BroadcastDelivery } from "../src/models/BroadcastDelivery.js";
+import { Counter } from "../src/models/Counter.js";
 
 function stubBroadcastSendModels(t, { markerDoc, existingDoc = null, audienceUserIds = [1, 2] } = {}) {
   const originalStartSession = mongoose.startSession;

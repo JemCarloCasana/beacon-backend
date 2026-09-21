@@ -7,9 +7,9 @@ if (!process.env.ADMIN_JWT_SECRET) {
   process.env.ADMIN_JWT_SECRET = "test-admin-secret";
 }
 
-const { default: adminAuthRouter } = await import("./routes/adminAuthRoutes.js");
-const { default: adminMeRouter } = await import("./routes/adminMeRoutes.js");
-const { pool } = await import("./db.js");
+const { default: adminAuthRouter } = await import("../src/routes/adminAuthRoutes.js");
+const { default: adminMeRouter } = await import("../src/routes/adminMeRoutes.js");
+const { pool } = await import("../src/db.js");
 
 function findRouteStack(router, path, method) {
   const layer = router.stack.find(
