@@ -31,7 +31,7 @@ This backend uses two auth systems:
   - Other `/admin/*` management routes guarded with `requirePermission(...)`
 - Public routes:
   - `GET /health`
-  - `GET /health/db`
+  - `GET /health/mongo`
   - `GET /users/:id/public`
   - `POST /admin/auth/login`
   - `POST /admin/auth/signup`
@@ -70,7 +70,8 @@ This backend uses two auth systems:
 
 ## Required Environment Variables
 
-- `DATABASE_URL`
+- `MONGODB_URI`
+- `MONGODB_DB_NAME` (optional when the database is included in `MONGODB_URI`)
 - `ADMIN_JWT_SECRET`
 - Firebase Admin credential strategy (pick one):
   - `FIREBASE_SERVICE_ACCOUNT_JSON` (raw JSON string)

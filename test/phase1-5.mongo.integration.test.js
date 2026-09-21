@@ -12,7 +12,7 @@ import { UserNotification } from "../src/models/UserNotification.js";
 import { ReportRun } from "../src/models/ReportRun.js";
 import { Counter } from "../src/models/Counter.js";
 import { sendBroadcastByPublicId } from "../src/services/broadcastSend.js";
-import { upsertMany, advanceCounter, compareImportedDocuments } from "../scripts/migrate-mongo.js";
+import { upsertMany, advanceCounter, compareImportedDocuments } from "./mongoImportHelpers.js";
 
 test("isolated Atlas migration and transaction checks", { skip: process.env.BEACON_RUN_MONGO_TESTS !== "1" }, async (t) => {
   const dbName = `beacon_fix_${randomUUID().replaceAll("-", "").slice(0, 24)}`;

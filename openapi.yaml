@@ -11,12 +11,12 @@ paths:
         "200":
           description: Service healthy
 
-  /health/db:
+  /health/mongo:
     get:
-      summary: Database health check
+      summary: MongoDB health check
       responses:
         "200":
-          description: DB reachable
+          description: MongoDB reachable
         "503":
           $ref: "#/components/responses/Error"
 

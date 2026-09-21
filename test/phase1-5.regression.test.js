@@ -11,7 +11,7 @@ import { BroadcastDelivery } from "../src/models/BroadcastDelivery.js";
 import { Counter } from "../src/models/Counter.js";
 import { sendBroadcastPush } from "../src/services/fcm.js";
 import { connectMongo } from "../src/mongo.js";
-import { upsertMany, advanceCounter, compareImportedDocuments } from "../scripts/migrate-mongo.js";
+import { upsertMany, advanceCounter, compareImportedDocuments } from "./mongoImportHelpers.js";
 
 const route = (method, path = "/admin/broadcasts/:id") => router.stack.find(
   (entry) => entry.route?.path === path && entry.route.methods[method]

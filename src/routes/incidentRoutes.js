@@ -862,7 +862,7 @@ router.post("/incidents", requireAppAuth, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // Map firebase uid -> postgres user id
+    // Map Firebase uid to the legacy numeric user id.
     const userRes = await client.query(
       "SELECT id FROM users WHERE firebase_uid = $1",
       [uid]

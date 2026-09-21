@@ -181,7 +181,7 @@ test("redactAuditValue truncates deep structures", () => {
   const deep = { a: { b: { c: { d: "x" } } } };
   assert.deepEqual(redactAuditValue(deep), { a: { b: { c: "[truncated]" } } });
   assert.equal(redactAuditValue({ password_hash: "hash" }).password_hash, "[redacted]");
-  assert.equal(redactAuditValue({ DATABASE_URL: "x" }).DATABASE_URL, "[redacted]");
+  assert.equal(redactAuditValue({ MONGODB_URI: "x" }).MONGODB_URI, "[redacted]");
 });
 
 test("failed admin login emits a sanitized audit line", async (t) => {

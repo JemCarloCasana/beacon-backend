@@ -21,9 +21,7 @@ import broadcastRoutes from "./src/routes/broadcastRoutes.js";
 import adminBroadcastRoutes from "./src/routes/adminBroadcastRoutes.js";
 import adminSosRoutes from "./src/routes/adminSosRoutes.js";
 import adminReportsRoutes from "./src/routes/adminReportsRoutes.js";
-import { pool } from "./src/db.js";
 import { connectMongo, disconnectMongo, isMongoConnected } from "./src/mongo.js";
-import { runMigrations } from "./scripts/migrate.js";
 import { createRateLimiter } from "./src/middleware/rateLimit.js";
 import { getAuthMetricsSnapshot } from "./src/utils/authMetrics.js";
 import { getSosStreamMetrics } from "./src/services/sosLiveOps.js";
@@ -110,16 +108,6 @@ app.use((err, req, res, next) => {
 // Health checks
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-app.get("/health/db", async (req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("Database health check failed");
-    res.status(503).json({ ok: false });
-  }
-});
-
 app.get("/health/mongo", async (req, res) => {
   try {
     await connectMongo();
@@ -199,25 +187,9 @@ async function startServer() {
   try {
     await connectMongo();
     console.log("MongoDB connected");
-    await runMigrations();
 
     app.listen(PORT, () => {
       console.log(`API running on http://localhost:${PORT}`);
-      (async () => {
-        try {
-          const dbIdentity = await pool.query(
-            "SELECT current_database() AS db_name, current_schema() AS schema_name"
-          );
-          const row = dbIdentity.rows?.[0] ?? {};
-          console.log("Startup diagnostics", {
-            port: PORT,
-            db_name: row.db_name ?? null,
-            schema_name: row.schema_name ?? null,
-          });
-        } catch (err) {
-          console.warn("Startup diagnostics unavailable", err?.message || err);
-        }
-      })();
     });
   } catch (err) {
     console.error("Fatal startup error:", err);

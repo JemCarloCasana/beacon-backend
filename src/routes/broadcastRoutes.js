@@ -10,6 +10,7 @@ import { auditLog } from "../utils/auditLog.js";
 import { Broadcast, hasValidBroadcastAudience } from "../models/Broadcast.js";
 import { BroadcastDelivery } from "../models/BroadcastDelivery.js";
 import { Counter } from "../models/Counter.js";
+import { AdminAccount } from "../models/Remaining.js";
 
 const router = express.Router();
 
@@ -281,19 +282,26 @@ router.get("/admin/broadcasts", requireAdminAuth, async (req, res) => {
       return res.status(401).json({ message: "Unauthorized" });
     }
 
-    const viewPermissionExistsResult = await pool.query(
-      `
-      SELECT 1
-      FROM permissions
-      WHERE name = 'view_broadcasts'
-      LIMIT 1
-      `
-    );
-
-    if (viewPermissionExistsResult.rowCount > 0) {
+    if (isMongoConnected()) {
       const permissions = await getAdminPermissions(adminId);
-      if (!permissions.includes("view_broadcasts")) {
+      if (permissions.length > 0 && !permissions.includes("view_broadcasts")) {
         return res.status(403).json({ message: "Insufficient permissions" });
+      }
+    } else {
+      const viewPermissionExistsResult = await pool.query(
+        `
+        SELECT 1
+        FROM permissions
+        WHERE name = 'view_broadcasts'
+        LIMIT 1
+        `
+      );
+
+      if (viewPermissionExistsResult.rowCount > 0) {
+        const permissions = await getAdminPermissions(adminId);
+        if (!permissions.includes("view_broadcasts")) {
+          return res.status(403).json({ message: "Insufficient permissions" });
+        }
       }
     }
 
@@ -566,11 +574,21 @@ router.delete(
   requirePermission("manage_broadcasts"),
   async (req, res, next) => {
     try {
-      const result = await pool.query(
-        "SELECT r.name AS role FROM admins a JOIN roles r ON r.id = a.role_id WHERE a.id = $1",
-        [req.admin.adminId]
-      );
-      if (result.rows[0]?.role !== "admin") {
+      let role;
+      if (isMongoConnected()) {
+        const admin = await AdminAccount.findOne({ public_id: req.admin.adminId })
+          .select({ role: 1 })
+          .lean();
+        role = admin?.role;
+      } else {
+        const result = await pool.query(
+          "SELECT r.name AS role FROM admins a JOIN roles r ON r.id = a.role_id WHERE a.id = $1",
+          [req.admin.adminId]
+        );
+        role = result.rows[0]?.role;
+      }
+
+      if (role !== "admin") {
         auditLog({
           action: "broadcast.deleted",
           actor: req.admin?.adminId,

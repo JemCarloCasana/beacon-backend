@@ -13,15 +13,12 @@
     "start": "node server.js",
     "start:prod": "NODE_ENV=production node server.js",
     "hash:admin-password": "node scripts/generateBcryptHash.js",
-    "mongo:import": "node scripts/migrate-mongo.js",
     "mongo:preflight": "node scripts/mongo-preflight.js",
-    "mongo:import:identity": "node scripts/migrate-identity-mongo.js",
     "test": "node test/remainingModels.test.js && node test/adminAuthRoutes.contract.test.js && node test/meRoutes.patch.test.js && node test/meRoutes.bootstrap.test.js && node test/adminUsers.patch.test.js && node test/adminAdmins.patch.test.js && node test/broadcastRoutes.auth.test.js && node test/broadcastRoutes.create.test.js && node test/requireAuth.middleware.test.js && node test/friendRoutes.test.js && node test/adminSosRoutes.liveops.test.js && node test/incidentRoutes.admin.test.js && node test/sosRoutes.test.js && node test/adminReportsRoutes.test.js && node test/userNotifications.test.js && node test/phase1-5.regression.test.js && node test/security.http.test.js"
   },
   "keywords": [
     "beacon",
     "express",
-    "postgres",
     "firebase"
   ],
   "author": "Jem Carlo Casaña",
@@ -35,7 +32,6 @@
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.10.1",
-    "morgan": "^1.10.1",
-    "pg": "^8.18.0"
+    "morgan": "^1.10.1"
   }
 }
