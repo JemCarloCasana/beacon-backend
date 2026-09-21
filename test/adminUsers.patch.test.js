@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import router from "../src/routes/adminAdminsRoutes.js";
 import { pool } from "../src/db.js";
+import { mongoose } from "../src/mongo.js";
+import { AdminAccount } from "../src/models/Remaining.js";
 
 function findRouteLayer(path, method) {
   const layer = router.stack.find(
@@ -337,6 +339,56 @@ test("PATCH /admin/users/:id returns 200 for status update when admin personnel 
   assert.equal(res.body.role, "personnel");
   assert.equal(res.body.email, "personnel10@example.com");
   assert.equal(res.body.status, "deactivated");
+});
+
+test("PATCH /admin/users/:id updates Mongo personnel accounts before user profiles", async (t) => {
+  const originalReadyState = mongoose.connection.readyState;
+  const originalFindOne = AdminAccount.findOne;
+  const originalFindOneAndUpdate = AdminAccount.findOneAndUpdate;
+  t.after(() => {
+    mongoose.connection.readyState = originalReadyState;
+    AdminAccount.findOne = originalFindOne;
+    AdminAccount.findOneAndUpdate = originalFindOneAndUpdate;
+  });
+
+  mongoose.connection.readyState = 1;
+  AdminAccount.findOne = () => ({
+    lean: async () => ({
+      public_id: 11,
+      email: "personnel11@example.com",
+      full_name: "Personnel Eleven",
+      role: "personnel",
+      status: "active",
+    }),
+  });
+  AdminAccount.findOneAndUpdate = () => ({
+    lean: async () => ({
+      public_id: 11,
+      email: "personnel11@example.com",
+      full_name: "Personnel Eleven",
+      status: "deactivated",
+    }),
+  });
+
+  const req = {
+    params: { id: "11" },
+    body: { status: "deactivated" },
+  };
+  const res = createRes();
+
+  await patchAdminUserHandler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, {
+    id: 11,
+    firebase_uid: null,
+    email: "personnel11@example.com",
+    full_name: "Personnel Eleven",
+    phone_number: null,
+    role: "personnel",
+    profile_image_url: null,
+    status: "deactivated",
+  });
 });
 
 test("PATCH /admin/users/:id falls back to users when admin id does not exist", async (t) => {

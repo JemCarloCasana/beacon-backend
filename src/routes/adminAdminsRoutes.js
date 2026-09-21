@@ -453,6 +453,40 @@ router.patch(
       }
 
       if (isMongoConnected()) {
+        if (Object.prototype.hasOwnProperty.call(normalized, "status")) {
+          const admin = await AdminAccount.findOne({ public_id: userId }).lean();
+          if (admin) {
+            if (admin.role !== "personnel") {
+              return res.status(409).json({ message: "Only personnel accounts can be deactivated/reactivated" });
+            }
+
+            const updated = await AdminAccount.findOneAndUpdate(
+              { public_id: userId, role: "personnel" },
+              { $set: { status: normalized.status, updated_at: new Date() } },
+              { returnDocument: "after" }
+            ).lean();
+
+            auditLog({
+              action: "admin.account_status_changed",
+              actor: req.admin?.adminId,
+              target: updated.email,
+              outcome: updated.status,
+              details: { id: updated.public_id },
+            });
+
+            return res.json({
+              id: updated.public_id,
+              firebase_uid: null,
+              email: updated.email,
+              full_name: updated.full_name,
+              phone_number: null,
+              role: "personnel",
+              profile_image_url: null,
+              status: updated.status,
+            });
+          }
+        }
+
         const current = await UserProfile.findOne({ public_id: userId }).lean();
         if (!current) return res.status(404).json({ message: "User not found" });
         if (normalized.email && normalized.email !== current.email && await UserProfile.exists({ email: normalized.email })) return res.status(409).json({ message: "Email already exists" });
