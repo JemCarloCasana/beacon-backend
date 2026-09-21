@@ -232,15 +232,6 @@ export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, 
   return { rows, nextCursor };
 }
 
-export async function getLatestThreadState(sosId) {
-  const result = await listLiveThreads({
-    status: "open",
-    limit: 500,
-    cursor: null
-  });
-  return result.rows.find((row) => Number(row.sos_id) === Number(sosId)) || null;
-}
-
 export async function getThreadStateAnyStatus(sosId) {
   if (isMongoConnected()) {
     const thread = await SosThread.findOne({ root_event_id: Number(sosId) }).lean();

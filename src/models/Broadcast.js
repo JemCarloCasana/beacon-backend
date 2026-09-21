@@ -72,4 +72,3 @@ broadcastSchema.index({ sent_at: -1 });
 
 export const Broadcast =
   mongoose.models.Broadcast ?? mongoose.model("Broadcast", broadcastSchema);
-export { SEVERITIES, AUDIENCE_TYPES, AUDIENCE_ROLES };

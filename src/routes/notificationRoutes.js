@@ -1,7 +1,7 @@
 import express from "express";
 import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
-import { normalizeUserNotificationRow } from "../services/userNotifications.js";
+import { normalizeUserNotificationRow, toUserNotificationRow } from "../services/userNotifications.js";
 import { UserNotification } from "../models/UserNotification.js";
 import { isMongoConnected } from "../mongo.js";
 import { findProfileByUid } from "../services/userProfiles.js";
@@ -13,22 +13,6 @@ function applyNotificationNoStoreHeaders(res) {
   res.set("Pragma", "no-cache");
   res.set("Vary", "Authorization");
   res.set("Expires", "0");
-}
-
-function toUserNotificationRow(doc) {
-  if (!doc || typeof doc !== "object") {
-    return doc;
-  }
-  return {
-    id: doc.public_id,
-    recipient_user_id: doc.recipient_user_id,
-    type: doc.type,
-    title: doc.title,
-    message: doc.message,
-    metadata: doc.metadata,
-    is_read: doc.is_read,
-    created_at: doc.created_at,
-  };
 }
 
 async function getCurrentUserId(firebaseUid) {

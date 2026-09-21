@@ -1,4 +1,3 @@
-import express from "express";
 import jwt from "jsonwebtoken";
 import { pool } from "../db.js";
 import { auditLog } from "../utils/auditLog.js";
@@ -7,7 +6,6 @@ import { AdminAccount } from "../models/Remaining.js";
 
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 
-const router = express.Router();
 const DEACTIVATED_MESSAGE = "Account is deactivated";
 
 export function assertAccountActive(account) {
@@ -124,39 +122,3 @@ export function requirePermission(permission) {
 }
 
 export const requireAdminAuth = requireAuth;
-
-/**
- * GET /admin/personnel
- * Returns all personnel/admin accounts
- * Permission required: manage_users
- */
-router.get(
-  "/admin/personnel",
-  requireAuth,
-  requirePermission("manage_users"),
-  async (req, res) => {
-    try {
-      const result = await pool.query(
-        `
-        SELECT 
-          a.id,
-          a.email,
-          a.full_name,
-          r.name AS role,
-          a.role_id,
-          a.created_at
-        FROM admins a
-        JOIN roles r ON r.id = a.role_id
-        ORDER BY a.created_at DESC
-        `
-      );
-
-      return res.json(result.rows);
-    } catch (err) {
-      console.error("Error fetching personnel:", err);
-      return res.status(500).json({ message: "Server error" });
-    }
-  }
-);
-
-export default router;
