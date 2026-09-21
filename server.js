@@ -120,11 +120,13 @@ app.get("/health/db", async (req, res) => {
   }
 });
 
-app.get("/health/mongo", (req, res) => {
-  if (isMongoConnected()) {
+app.get("/health/mongo", async (req, res) => {
+  try {
+    await connectMongo();
     return res.json({ ok: true });
+  } catch {
+    return res.status(503).json({ ok: false });
   }
-  return res.status(503).json({ ok: false });
 });
 
 app.get("/health/auth-metrics", (req, res) => {
@@ -133,6 +135,20 @@ app.get("/health/auth-metrics", (req, res) => {
     metrics: getAuthMetricsSnapshot(),
     sos: getSosStreamMetrics()
   });
+});
+
+// Vercel has no long-lived startup phase; connect lazily per warm function.
+app.use(async (req, res, next) => {
+  if (!process.env.VERCEL || !process.env.MONGODB_URI || isMongoConnected()) {
+    return next();
+  }
+
+  try {
+    await connectMongo();
+    return next();
+  } catch {
+    return res.status(503).json({ error: "MongoDB unavailable" });
+  }
 });
 
 // Auth-sensitive rate limits
@@ -225,7 +241,9 @@ process.once("SIGINT", async () => {
   }
 });
 
-startServerIfDirectRun();
+if (!process.env.VERCEL) {
+  startServerIfDirectRun();
+}
 
 function startServerIfDirectRun() {
   const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
@@ -236,6 +254,7 @@ function startServerIfDirectRun() {
 }
 
 export { app };
+export default app;
 
 
 
