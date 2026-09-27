@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import { auditLog } from "../utils/auditLog.js";
-import { AdminAccount } from "../models/Remaining.js";
+import { AdminRecord } from "../models/Reduced.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 
@@ -14,13 +15,17 @@ export function assertAccountActive(account) {
 }
 
 export async function getAdminAuthAccount(adminId) {
-  const account = await AdminAccount.findOne({ public_id: adminId }).select({ public_id: 1, status: 1 }).lean();
-  return account ? { id: Number(account.public_id), status: account.status } : null;
+  const objectId = parseObjectId(adminId);
+  if (!objectId) return null;
+  const account = await AdminRecord.findOne({ _id: objectId, record_type: "account" }).select({ _id: 1, status: 1 }).lean();
+  return account ? { id: account._id.toString(), status: account.status } : null;
 }
 
 export async function getAdminPermissions(adminId) {
-  const account = await AdminAccount.findOne({ public_id: adminId }).select({ permission_names: 1 }).lean();
-  return account?.permission_names ?? [];
+  const objectId = parseObjectId(adminId);
+  if (!objectId) return [];
+  const account = await AdminRecord.findOne({ _id: objectId, record_type: "account" }).select({ permissions: 1 }).lean();
+  return account?.permissions ?? [];
 }
 
 export async function requireAuth(req, res, next) {
@@ -34,28 +39,25 @@ export async function requireAuth(req, res, next) {
     }
 
     const decoded = jwt.verify(token, JWT_SECRET);
-    const parsedAdminId = Number(decoded.adminId ?? decoded.sub);
-    if (!Number.isInteger(parsedAdminId) || parsedAdminId <= 0) {
+    const parsedAdminId = parseObjectId(decoded.adminId ?? decoded.sub);
+    if (!parsedAdminId) {
       auditLog({ action: "admin.auth", target: `${req.method} ${req.path}`, outcome: "invalid_token" });
       return res.status(401).json({ message: "Invalid or expired token" });
     }
 
-    const account = await getAdminAuthAccount(parsedAdminId);
+    const adminId = parsedAdminId.toString();
+    const account = await getAdminAuthAccount(adminId);
     if (!account) {
-      auditLog({ action: "admin.auth", actor: parsedAdminId, target: `${req.method} ${req.path}`, outcome: "unknown_account" });
+      auditLog({ action: "admin.auth", actor: adminId, target: `${req.method} ${req.path}`, outcome: "unknown_account" });
       return res.status(401).json({ message: "Invalid or expired token" });
     }
     const activeCheck = assertAccountActive(account);
     if (!activeCheck.ok) {
-      auditLog({ action: "admin.auth", actor: parsedAdminId, target: `${req.method} ${req.path}`, outcome: "deactivated" });
+      auditLog({ action: "admin.auth", actor: adminId, target: `${req.method} ${req.path}`, outcome: "deactivated" });
       return res.status(activeCheck.statusCode).json({ message: activeCheck.message });
     }
 
-    req.admin = {
-      adminId: parsedAdminId,
-      role: decoded.role,
-      roleId: decoded.roleId
-    };
+    req.admin = { adminId, role: decoded.role };
 
     next();
   } catch (err) {

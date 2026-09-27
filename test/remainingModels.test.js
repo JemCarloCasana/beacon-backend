@@ -1,29 +1,56 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import mongoose from "mongoose";
 import {
-  UserProfile, AdminAccount, EmergencyContact, FriendRequest, Friendship, Device,
-  SosThread, SosEvent, IncidentReport, IncidentEvidence, AdminAccessRequest,
-} from "../src/models/Remaining.js";
+  AdminRecord,
+  FriendConnection,
+  Notification,
+  ReducedBroadcast,
+  ReducedIncidentReport,
+  ReducedReportRun,
+  ReducedUserProfile,
+  SosRecord,
+} from "../src/models/Reduced.js";
 
-test("remaining Mongo models expose positive public IDs and reject invalid enums", () => {
-  const invalidUser = new UserProfile({ public_id: 0, firebase_uid: "uid", full_name: "User", email: "u@example.com", role: "admin" });
-  assert.ok(invalidUser.validateSync().errors.public_id);
+test("reduced Mongo models define exactly eight collections and no numeric public IDs", () => {
+  const collections = Object.values(mongoose.models).map((model) => model.collection.collectionName).sort();
+  assert.deepEqual(collections, [
+    "admin_records",
+    "admin_report_runs",
+    "broadcasts",
+    "friend_connections",
+    "incident_reports",
+    "notifications",
+    "sos_records",
+    "user_profiles",
+  ]);
+  for (const model of Object.values(mongoose.models)) {
+    assert.equal(model.schema.path("public_id"), undefined);
+  }
+
+  const invalidUser = new ReducedUserProfile({
+    firebase_uid: "uid",
+    full_name: "User",
+    email: "u@example.com",
+    role: "admin",
+  });
   assert.ok(invalidUser.validateSync().errors.role);
 
-  const invalidSos = new SosEvent({ public_id: 1, user_id: 1, status: "bogus" });
-  assert.ok(invalidSos.validateSync().errors.status);
+  const invalidSosEvent = new SosRecord({
+    record_type: "event",
+    user_id: new mongoose.Types.ObjectId(),
+    status: "bogus",
+  });
+  assert.ok(invalidSosEvent.validateSync().errors.status);
 });
 
-test("remaining Mongo models define required uniqueness indexes", () => {
-  assert.ok(UserProfile.schema.indexes().some(([fields, options]) => fields.email === 1 && options.unique));
-  assert.ok(AdminAccount.schema.indexes().some(([fields, options]) => fields.email === 1 && options.unique));
-  assert.ok(FriendRequest.schema.indexes().some(([fields, options]) => fields.requester_user_id === 1 && options.unique));
-  assert.ok(Friendship.schema.indexes().some(([fields, options]) => fields.user_id === 1 && options.unique));
-  assert.ok(Device.schema.indexes().some(([fields, options]) => fields.fcm_token === 1 && options.unique));
-  assert.ok(EmergencyContact.schema.indexes().some(([fields]) => fields.owner_user_id === 1));
-  assert.ok(SosThread.schema.indexes().some(([fields]) => fields.latest_status === 1));
-  assert.ok(SosEvent.schema.indexes().some(([fields]) => fields.sos_id === 1));
-  assert.ok(IncidentReport.schema.indexes().some(([fields]) => fields.status === 1));
-  assert.ok(IncidentEvidence.schema.indexes().some(([fields]) => fields.incident_report_id === 1));
-  assert.ok(AdminAccessRequest.schema.indexes().some(([fields]) => fields.personnel_admin_id === 1));
+test("reduced collections define their relationship and lookup indexes", () => {
+  assert.ok(ReducedUserProfile.schema.indexes().some(([fields, options]) => fields.email === 1 && options.unique));
+  assert.ok(AdminRecord.schema.indexes().some(([fields, options]) => fields.email === 1 && options.unique));
+  assert.ok(FriendConnection.schema.indexes().some(([fields]) => fields.user_ids === 1));
+  assert.ok(SosRecord.schema.indexes().some(([fields]) => fields.thread_id === 1));
+  assert.ok(ReducedIncidentReport.schema.indexes().some(([fields]) => fields.status === 1));
+  assert.ok(ReducedBroadcast.schema.indexes().some(([fields]) => fields.created_at === -1));
+  assert.ok(Notification.schema.indexes().some(([fields]) => fields.recipient_id === 1));
+  assert.ok(ReducedReportRun.schema.indexes().some(([fields]) => fields.report_key === 1));
 });

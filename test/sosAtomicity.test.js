@@ -1,8 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as sosLiveOps from "../src/services/sosLiveOps.js";
-import { Counter } from "../src/models/Counter.js";
-import { SosEvent, SosThread } from "../src/models/Remaining.js";
+import { SosRecord } from "../src/models/Reduced.js";
 import { mongoose } from "../src/mongo.js";
 
 function stub(t, target, key, replacement) {
@@ -19,24 +18,27 @@ test("appendThreadStatusEvent changes the thread and appends its event in one Mo
     async withTransaction(work) { calls.push("transaction"); return work(); },
     async endSession() { calls.push("end"); },
   };
+  const threadId = new mongoose.Types.ObjectId();
+  const userId = new mongoose.Types.ObjectId();
+  const sosId = new mongoose.Types.ObjectId();
   const latest = { latitude: 1.25, longitude: 2.5, address: "Beacon Hall" };
   stub(t, mongoose, "startSession", async () => session);
-  stub(t, Counter, "nextPublicId", async (key) => { assert.equal(key, "sos_events"); return 81; });
-  stub(t, SosEvent, "findOne", (filter) => {
-    assert.deepEqual(filter, { thread_id: 7 });
+  stub(t, SosRecord, "findOne", (filter) => {
+    assert.deepEqual(filter, { thread_id: threadId, record_type: "event" });
     return { sort() { return this; }, session(value) { assert.equal(value, session); return this; }, lean: async () => latest };
   });
-  stub(t, SosThread, "updateOne", async (filter, update, options) => {
+  stub(t, SosRecord, "updateOne", async (filter, update, options) => {
     calls.push("thread");
-    assert.deepEqual(filter, { public_id: 7, latest_status: "active" });
+    assert.deepEqual(filter, { _id: threadId, record_type: "case", latest_status: "active" });
     assert.equal(update.$set.latest_status, "resolved");
     assert.equal(options.session, session);
     return { modifiedCount: 1 };
   });
-  stub(t, SosEvent, "create", async (documents, options) => {
+  stub(t, SosRecord, "create", async (documents, options) => {
     calls.push("event");
     assert.equal(options.session, session);
-    assert.equal(documents[0].public_id, 81);
+    assert.equal(documents[0].record_type, "event");
+    assert.equal(documents[0].sos_id.toString(), sosId.toString());
     assert.equal(documents[0].latitude, latest.latitude);
     assert.equal(documents[0].longitude, latest.longitude);
     return documents;
@@ -44,32 +46,33 @@ test("appendThreadStatusEvent changes the thread and appends its event in one Mo
 
   const createdAt = new Date("2026-09-27T00:00:00Z");
   const event = await sosLiveOps.appendThreadStatusEvent({
-    thread: { public_id: 7, user_id: 3, emergency_category: "medical" },
-    sosId: 42,
+    thread: { _id: threadId, user_id: userId, emergency_category: "medical" },
+    sosId: sosId.toString(),
     threadUpdates: { latest_status: "resolved", terminal_status: "safe" },
-    event: { user_id: 3, status: "safe", actor_type: "user", event_type: "status_update" },
+    event: { user_id: userId, status: "safe", actor_type: "user", event_type: "status_update" },
     createdAt,
   });
 
-  assert.equal(event.public_id, 81);
+  assert.equal(event.record_type, "event");
   assert.deepEqual(calls, ["transaction", "thread", "event", "end"]);
 });
 
 test("appendThreadStatusEvent does not append an event when the active thread changed concurrently", async (t) => {
   const session = { withTransaction: async (work) => work(), endSession: async () => {} };
+  const threadId = new mongoose.Types.ObjectId();
+  const userId = new mongoose.Types.ObjectId();
   let eventCreated = false;
   stub(t, mongoose, "startSession", async () => session);
-  stub(t, Counter, "nextPublicId", async () => 82);
-  stub(t, SosEvent, "findOne", () => ({ sort() { return this; }, session() { return this; }, lean: async () => null }));
-  stub(t, SosThread, "updateOne", async () => ({ modifiedCount: 0 }));
-  stub(t, SosEvent, "create", async () => { eventCreated = true; });
+  stub(t, SosRecord, "findOne", () => ({ sort() { return this; }, session() { return this; }, lean: async () => null }));
+  stub(t, SosRecord, "updateOne", async () => ({ modifiedCount: 0 }));
+  stub(t, SosRecord, "create", async () => { eventCreated = true; });
 
   await assert.rejects(
     sosLiveOps.appendThreadStatusEvent({
-      thread: { public_id: 7, user_id: 3, emergency_category: "medical" },
-      sosId: 42,
+      thread: { _id: threadId, user_id: userId, emergency_category: "medical" },
+      sosId: new mongoose.Types.ObjectId().toString(),
       threadUpdates: { latest_status: "resolved" },
-      event: { user_id: 3, status: "safe", actor_type: "user", event_type: "status_update" },
+      event: { user_id: userId, status: "safe", actor_type: "user", event_type: "status_update" },
     }),
     (error) => error.statusCode === 409
   );
@@ -84,13 +87,15 @@ test("createSosThreadWithRootEvent creates the root event and thread in one Mong
     async endSession() { calls.push("end"); },
   };
   stub(t, mongoose, "startSession", async () => session);
-  stub(t, SosEvent, "create", async (documents, options) => { calls.push("event"); assert.equal(options.session, session); return documents; });
-  stub(t, SosThread, "create", async (documents, options) => { calls.push("thread"); assert.equal(options.session, session); return documents; });
+  stub(t, SosRecord, "create", async (documents, options) => { calls.push(documents[0].record_type); assert.equal(options.session, session); return documents; });
 
+  const rootEventId = new mongoose.Types.ObjectId();
+  const threadId = new mongoose.Types.ObjectId();
+  const userId = new mongoose.Types.ObjectId();
   await sosLiveOps.createSosThreadWithRootEvent({
-    event: { public_id: 81, sos_id: 81, thread_id: 91, user_id: 3, status: "active" },
-    thread: { public_id: 91, root_event_id: 81, user_id: 3, latest_status: "active" },
+    event: { _id: rootEventId, sos_id: rootEventId, thread_id: threadId, user_id: userId, status: "active" },
+    thread: { _id: threadId, root_event_id: rootEventId, user_id: userId, latest_status: "active" },
   });
 
-  assert.deepEqual(calls, ["transaction", "event", "thread", "end"]);
+  assert.deepEqual(calls, ["transaction", "event", "case", "end"]);
 });

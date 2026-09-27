@@ -1,10 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import mongoose from "mongoose";
 
 import router from "../src/routes/adminAdminsRoutes.js";
-import { AdminNotification } from "../src/models/AdminNotification.js";
-import { Counter } from "../src/models/Counter.js";
-import { AdminAccount, AdminAccessRequest, Role } from "../src/models/Remaining.js";
+import { AdminRecord, Notification } from "../src/models/Reduced.js";
 
 function route(path, method) {
   const layer = router.stack.find((entry) => entry.route?.path === path && entry.route.methods?.[method]);
@@ -31,71 +30,78 @@ function stub(t, model, method, replacement) {
 
 const lean = (value) => ({ lean: async () => value });
 
-test("POST /admin/admins creates a Mongo admin account with a numeric public ID", async (t) => {
+test("POST /admin/admins creates an admin account with an ObjectId string", async (t) => {
   let createArgs;
-  stub(t, Role, "findOne", () => lean({ public_id: 2 }));
-  stub(t, AdminAccount, "findOne", () => lean(null));
-  stub(t, Counter, "nextPublicId", async (name) => { assert.equal(name, "admins"); return 14; });
-  stub(t, AdminAccount, "create", async (value) => { createArgs = value; return { ...value, created_at: new Date("2026-03-22T00:00:00.000Z") }; });
+  const id = new mongoose.Types.ObjectId();
+  stub(t, AdminRecord, "findOne", () => lean(null));
+  stub(t, AdminRecord, "create", async (value) => { createArgs = value; return { ...value, _id: id, created_at: new Date("2026-03-22T00:00:00.000Z") }; });
 
   const res = response();
-  await route("/admin/admins", "post")({ body: { full_name: "Personnel User", email: "Personnel@example.com", password: "SecurePass1!", role: "personnel" }, admin: { adminId: 5 } }, res);
+  await route("/admin/admins", "post")({ body: { full_name: "Personnel User", email: "Personnel@example.com", password: "SecurePass1!", role: "personnel" }, admin: { adminId: id.toString() } }, res);
 
   assert.equal(res.statusCode, 201);
-  assert.deepEqual({ id: res.body.id, email: res.body.email, full_name: res.body.full_name, role_id: res.body.role_id, role: res.body.role }, {
-    id: 14, email: "personnel@example.com", full_name: "Personnel User", role_id: 2, role: "personnel",
+  assert.deepEqual({ id: res.body.id, email: res.body.email, full_name: res.body.full_name, role: res.body.role }, {
+    id: id.toString(), email: "personnel@example.com", full_name: "Personnel User", role: "personnel",
   });
   assert.match(createArgs.password_hash, /^\$2/);
-  assert.equal(createArgs.public_id, 14);
-  assert.deepEqual(createArgs.permission_names, []);
+  assert.equal(createArgs.record_type, "account");
+  assert.deepEqual(createArgs.permissions, []);
 });
 
 test("GET /admin/admins applies status filtering and keeps the public response shape", async (t) => {
   let filter;
-  const rows = [{ public_id: 7, email: "staff@example.com", full_name: "Staff", role_id: 2, created_at: "2026-01-01", status: "active" }];
-  stub(t, AdminAccount, "find", (value) => { filter = value; return { sort: () => lean(rows) }; });
+  const id = new mongoose.Types.ObjectId();
+  const rows = [{ _id: id, email: "staff@example.com", full_name: "Staff", role: "personnel", created_at: "2026-01-01", status: "active" }];
+  stub(t, AdminRecord, "find", (value) => { filter = value; return { sort: () => lean(rows) }; });
   const res = response();
   await route("/admin/admins", "get")({ query: { status: "ACTIVE" } }, res);
-  assert.deepEqual(filter, { status: "active" });
-  assert.deepEqual(res.body, [{ id: 7, email: "staff@example.com", full_name: "Staff", role_id: 2, created_at: "2026-01-01", status: "active" }]);
+  assert.deepEqual(filter, { record_type: "account", status: "active" });
+  assert.deepEqual(res.body, [{ id: id.toString(), email: "staff@example.com", full_name: "Staff", role: "personnel", created_at: "2026-01-01", status: "active" }]);
 });
 
 test("PATCH /admin/admins/:id updates normalized Mongo account fields", async (t) => {
-  const current = { public_id: 14, email: "old@example.com", full_name: "Old Name", role_id: 2, created_at: "2026-01-01" };
+  const id = new mongoose.Types.ObjectId();
+  const current = { _id: id, email: "old@example.com", full_name: "Old Name", role: "personnel", created_at: "2026-01-01" };
   let update;
-  stub(t, AdminAccount, "findOne", () => lean(current));
-  stub(t, AdminAccount, "exists", async () => false);
-  stub(t, AdminAccount, "findOneAndUpdate", (_filter, value) => { update = value; return lean({ ...current, ...value.$set }); });
+  stub(t, AdminRecord, "findOne", () => lean(current));
+  stub(t, AdminRecord, "exists", async () => false);
+  stub(t, AdminRecord, "findOneAndUpdate", (_filter, value) => { update = value; return lean({ ...current, ...value.$set }); });
   const res = response();
-  await route("/admin/admins/:id", "patch")({ params: { id: "14" }, body: { full_name: " New Name ", email: "NEW@example.com" }, admin: { adminId: 1 } }, res);
+  await route("/admin/admins/:id", "patch")({ params: { id: id.toString() }, body: { full_name: " New Name ", email: "NEW@example.com" }, admin: { adminId: id.toString() } }, res);
   assert.equal(update.$set.full_name, "New Name");
   assert.equal(update.$set.email, "new@example.com");
-  assert.deepEqual(res.body, { id: 14, email: "new@example.com", full_name: "New Name", role_id: 2, created_at: "2026-01-01" });
+  assert.deepEqual(res.body, { id: id.toString(), email: "new@example.com", full_name: "New Name", created_at: "2026-01-01" });
 });
 
 test("POST /admin/admin-requests persists a pending Mongo request and notification", async (t) => {
   let requestDoc;
   let notificationDoc;
-  stub(t, AdminAccount, "findOne", () => lean({ public_id: 19, role: "personnel" }));
-  stub(t, AdminAccessRequest, "exists", async () => false);
-  stub(t, Counter, "nextPublicId", async (name) => name === "admin_requests" ? 50 : 51);
-  stub(t, AdminAccessRequest, "create", async (value) => { requestDoc = value; return value; });
-  stub(t, AdminNotification, "create", async (value) => { notificationDoc = value; return value; });
+  const personnelId = new mongoose.Types.ObjectId();
+  const requesterId = new mongoose.Types.ObjectId();
+  const requestId = new mongoose.Types.ObjectId();
+  stub(t, AdminRecord, "findOne", () => lean({ _id: personnelId, role: "personnel" }));
+  stub(t, AdminRecord, "exists", async () => false);
+  stub(t, AdminRecord, "create", async (value) => { requestDoc = { ...value, _id: requestId }; return requestDoc; });
+  stub(t, Notification, "create", async (value) => { notificationDoc = value; return value; });
   const res = response();
-  await route("/admin/admin-requests", "post")({ body: { personnel_id: 19, note: "Please review" }, admin: { adminId: 4 } }, res);
+  await route("/admin/admin-requests", "post")({ body: { personnel_id: personnelId.toString(), note: "Please review" }, admin: { adminId: requesterId.toString() } }, res);
   assert.equal(res.statusCode, 201);
-  assert.deepEqual({ id: requestDoc.public_id, personnel: requestDoc.personnel_admin_id, requester: requestDoc.requested_by_admin_id, status: requestDoc.status, note: requestDoc.note }, { id: 50, personnel: 19, requester: 4, status: "pending", note: "Please review" });
-  assert.deepEqual(notificationDoc.metadata, { admin_request_id: 50, requested_by_admin_id: 4 });
+  assert.deepEqual({ id: res.body.request.id, personnel: requestDoc.personnel_admin_id.toString(), requester: requestDoc.requested_by_admin_id.toString(), status: requestDoc.status, note: requestDoc.note }, { id: requestId.toString(), personnel: personnelId.toString(), requester: requesterId.toString(), status: "pending", note: "Please review" });
+  assert.deepEqual(notificationDoc.metadata, { admin_request_id: requestId.toString(), requested_by_admin_id: requesterId.toString() });
 });
 
 test("PATCH /admin/admin-requests/:id/reject updates only a pending Mongo request", async (t) => {
-  const current = { public_id: 50, personnel_admin_id: 19, status: "pending" };
+  const id = new mongoose.Types.ObjectId();
+  const personnelId = new mongoose.Types.ObjectId();
+  const current = { _id: id, personnel_admin_id: personnelId, status: "pending" };
   let updateFilter;
-  stub(t, AdminAccessRequest, "findOne", () => lean(current));
-  stub(t, AdminAccessRequest, "findOneAndUpdate", (filter, update) => { updateFilter = filter; return lean({ ...current, ...update.$set }); });
+  stub(t, AdminRecord, "findOne", () => lean(current));
+  stub(t, AdminRecord, "findOneAndUpdate", (filter, update) => { updateFilter = filter; return lean({ ...current, ...update.$set }); });
   const res = response();
-  await route("/admin/admin-requests/:id/reject", "patch")({ params: { id: "50" }, body: { note: "Reviewed" }, admin: { adminId: 19 } }, res);
-  assert.deepEqual(updateFilter, { public_id: 50, status: "pending" });
+  await route("/admin/admin-requests/:id/reject", "patch")({ params: { id: id.toString() }, body: { note: "Reviewed" }, admin: { adminId: personnelId.toString() } }, res);
+  assert.equal(updateFilter._id.toString(), id.toString());
+  assert.equal(updateFilter.record_type, "access_request");
+  assert.equal(updateFilter.status, "pending");
   assert.equal(res.body.request.status, "rejected");
-  assert.equal(res.body.request.personnel_id, 19);
+  assert.equal(res.body.request.personnel_id, personnelId.toString());
 });

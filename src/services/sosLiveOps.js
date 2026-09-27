@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
-import { Counter } from "../models/Counter.js";
-import { UserProfile, SosThread, SosEvent, AdminAccount } from "../models/Remaining.js";
+import { AdminRecord, ReducedUserProfile as UserProfile, SosRecord } from "../models/Reduced.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 const VALID_STATUSES = new Set(["active", "resolved", "acknowledged", "cancelled", "safe"]);
 const VALID_EVENT_TYPES = new Set(["report_created", "status_update", "admin_acknowledged", "note"]);
@@ -101,13 +101,13 @@ export function parseLiveListParams(query) {
   let cursor = null;
   if (query?.cursor) {
     const decoded = decodeCursorPayload(query.cursor);
-    const parsedSosId = Number(decoded?.sos_id);
+    const parsedSosId = parseObjectId(decoded?.sos_id);
     const parsedTimestamp = decoded?.latest_event_at ? new Date(decoded.latest_event_at) : null;
-    if (!Number.isInteger(parsedSosId) || parsedSosId <= 0 || Number.isNaN(parsedTimestamp?.getTime?.())) {
+    if (!parsedSosId || Number.isNaN(parsedTimestamp?.getTime?.())) {
       return { ok: false, message: "Invalid cursor" };
     }
     cursor = {
-      sos_id: parsedSosId,
+      sos_id: parsedSosId.toString(),
       latest_event_at: parsedTimestamp.toISOString()
     };
   }
@@ -116,85 +116,91 @@ export function parseLiveListParams(query) {
 }
 
 export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, cursor = null }) {
-  {
-    const filter = status === "open" ? { latest_status: "active" } : status === "cancelled" || status === "safe" ? { latest_status: "resolved", terminal_status: status } : { latest_status: status };
-    const threads = await SosThread.find(filter).sort({ updated_at: -1, root_event_id: -1 }).limit(limit + 1).lean();
-    const profiles = await UserProfile.find({ public_id: { $in: threads.map((t) => t.user_id) } }).lean();
-    const byUser = new Map(profiles.map((p) => [Number(p.public_id), p]));
-    const rows = [];
-    for (const thread of threads) {
-      const root = await SosEvent.findOne({ public_id: thread.root_event_id }).lean();
-      const latest = await SosEvent.findOne({ thread_id: thread.public_id }).sort({ created_at: -1, public_id: -1 }).lean();
-      const profile = byUser.get(Number(thread.user_id));
-      if (!profile || (!root && !latest)) continue;
-      const event = latest || root;
-      const row = withThreadAliases({ thread_id: thread.public_id, sos_id: thread.root_event_id, user_id: thread.user_id, full_name: profile.full_name, phone_number: profile.phone_number, role: profile.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event?.message ?? null, latest_latitude: event?.latitude ?? null, latest_longitude: event?.longitude ?? null, latest_address: event?.address ?? null, latest_event_at: event?.created_at ?? thread.updated_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
-      if (cursor && (new Date(row.latest_event_at) > new Date(cursor.latest_event_at) || (new Date(row.latest_event_at).getTime() === new Date(cursor.latest_event_at).getTime() && Number(row.sos_id) >= Number(cursor.sos_id)))) continue;
-      rows.push(row);
-    }
-    rows.sort((a, b) => new Date(b.latest_event_at) - new Date(a.latest_event_at) || Number(b.sos_id) - Number(a.sos_id));
-    let nextCursor = null;
-    if (rows.length > limit) { const overflow = rows[limit - 1]; rows.length = limit; nextCursor = encodeCursorPayload({ latest_event_at: overflow.latest_event_at, sos_id: overflow.sos_id }); }
-    return { rows, nextCursor };
+  const filter = status === "open" ? { latest_status: "active" } : status === "cancelled" || status === "safe" ? { latest_status: "resolved", terminal_status: status } : { latest_status: status };
+  const threads = await SosRecord.find({ ...filter, record_type: "case" }).sort({ updated_at: -1, _id: -1 }).limit(limit + 1).lean();
+  const userIds = [...new Map(threads.map((thread) => [thread.user_id.toString(), thread.user_id])).values()];
+  const profiles = await UserProfile.find({ _id: { $in: userIds } }).lean();
+  const byUser = new Map(profiles.map((profile) => [profile._id.toString(), profile]));
+  const events = await SosRecord.find({ record_type: "event", thread_id: { $in: threads.map((thread) => thread._id) } }).sort({ created_at: -1, _id: -1 }).lean();
+  const latestByThread = new Map();
+  for (const event of events) if (!latestByThread.has(event.thread_id.toString())) latestByThread.set(event.thread_id.toString(), event);
+  const eventById = new Map(events.map((event) => [event._id.toString(), event]));
+  const rows = [];
+  for (const thread of threads) {
+    const root = eventById.get(thread.root_event_id.toString());
+    const event = latestByThread.get(thread._id.toString()) ?? root;
+    const profile = byUser.get(thread.user_id.toString());
+    if (!profile || !event) continue;
+    const row = withThreadAliases({ thread_id: thread._id.toString(), sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), full_name: profile.full_name, phone_number: profile.phone_number, role: profile.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id?.toString() ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event.message ?? null, latest_latitude: event.latitude ?? null, latest_longitude: event.longitude ?? null, latest_address: event.address ?? null, latest_event_at: event.created_at ?? thread.updated_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
+    if (cursor && (new Date(row.latest_event_at) > new Date(cursor.latest_event_at) || (new Date(row.latest_event_at).getTime() === new Date(cursor.latest_event_at).getTime() && row.sos_id >= cursor.sos_id))) continue;
+    rows.push(row);
   }
+  rows.sort((a, b) => new Date(b.latest_event_at) - new Date(a.latest_event_at) || b.sos_id.localeCompare(a.sos_id));
+  let nextCursor = null;
+  if (rows.length > limit) { const overflow = rows[limit - 1]; rows.length = limit; nextCursor = encodeCursorPayload({ latest_event_at: overflow.latest_event_at, sos_id: overflow.sos_id }); }
+  return { rows, nextCursor };
 }
 
 export async function getThreadStateAnyStatus(sosId) {
-  {
-    const thread = await SosThread.findOne({ root_event_id: Number(sosId) }).lean();
-    if (!thread) return null;
-    const profile = await UserProfile.findOne({ public_id: thread.user_id }).lean();
-    const root = await SosEvent.findOne({ public_id: thread.root_event_id }).lean();
-    const latest = await SosEvent.findOne({ thread_id: thread.public_id }).sort({ created_at: -1, public_id: -1 }).lean();
-    const event = latest || root;
-    return withThreadAliases({ thread_id: thread.public_id, sos_id: thread.root_event_id, user_id: thread.user_id, full_name: profile?.full_name, phone_number: profile?.phone_number, role: profile?.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event?.message ?? null, latest_latitude: event?.latitude ?? null, latest_longitude: event?.longitude ?? null, latest_address: event?.address ?? null, latest_event_at: event?.created_at ?? thread.updated_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
-  }
+  const rootId = parseObjectId(sosId);
+  if (!rootId) return null;
+  const thread = await SosRecord.findOne({ root_event_id: rootId, record_type: "case" }).lean();
+  if (!thread) return null;
+  const [profile, root, latest] = await Promise.all([
+    UserProfile.findById(thread.user_id).lean(),
+    SosRecord.findOne({ _id: rootId, record_type: "event" }).lean(),
+    SosRecord.findOne({ thread_id: thread._id, record_type: "event" }).sort({ created_at: -1, _id: -1 }).lean(),
+  ]);
+  const event = latest || root;
+  return withThreadAliases({ thread_id: thread._id.toString(), sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), full_name: profile?.full_name, phone_number: profile?.phone_number, role: profile?.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id?.toString() ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event?.message ?? null, latest_latitude: event?.latitude ?? null, latest_longitude: event?.longitude ?? null, latest_address: event?.address ?? null, latest_event_at: event?.created_at ?? thread.updated_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
 }
 
 export async function listThreadEvents(sosId) {
-  {
-    const events = await SosEvent.find({ sos_id: Number(sosId) }).sort({ created_at: 1, public_id: 1 }).lean();
-    const thread = await SosThread.findOne({ root_event_id: Number(sosId) }).lean();
-    const admins = await AdminAccount.find({ public_id: { $in: events.map((e) => e.actor_admin_id).filter(Boolean) } }).lean();
-    const names = new Map(admins.map((a) => [Number(a.public_id), a.full_name]));
-    return events.map((event) => ({ id: event.public_id, thread_id: event.thread_id, sos_id: event.sos_id, user_id: event.user_id, status: event.status === "resolved" && event.actor_type === "user" && event.event_type === "status_update" && thread?.terminal_status ? thread.terminal_status : event.status, latitude: event.latitude, longitude: event.longitude, address: event.address, message: event.message, created_at: event.created_at, actor_type: event.actor_type, actor_name: event.actor_admin_id ? names.get(Number(event.actor_admin_id)) : null, actor_admin_id: event.actor_admin_id, event_type: event.event_type, emergency_category: event.emergency_category }));
-  }
+  const rootId = parseObjectId(sosId);
+  if (!rootId) return [];
+  const [events, thread] = await Promise.all([
+    SosRecord.find({ sos_id: rootId, record_type: "event" }).sort({ created_at: 1, _id: 1 }).lean(),
+    SosRecord.findOne({ root_event_id: rootId, record_type: "case" }).lean(),
+  ]);
+  const adminIds = [...new Map(events.filter((event) => event.actor_admin_id).map((event) => [event.actor_admin_id.toString(), event.actor_admin_id])).values()];
+  const admins = await AdminRecord.find({ _id: { $in: adminIds }, record_type: "account" }).select({ _id: 1, full_name: 1 }).lean();
+  const names = new Map(admins.map((admin) => [admin._id.toString(), admin.full_name]));
+  return events.map((event) => ({ id: event._id.toString(), thread_id: event.thread_id.toString(), sos_id: event.sos_id.toString(), user_id: event.user_id.toString(), status: event.status === "resolved" && event.actor_type === "user" && event.event_type === "status_update" && thread?.terminal_status ? thread.terminal_status : event.status, latitude: event.latitude, longitude: event.longitude, address: event.address, message: event.message, created_at: event.created_at, actor_type: event.actor_type, actor_name: event.actor_admin_id ? names.get(event.actor_admin_id.toString()) : null, actor_admin_id: event.actor_admin_id?.toString() ?? null, event_type: event.event_type, emergency_category: event.emergency_category }));
 }
 
 export async function listLiveMapRows() {
-  {
-    const threads = await SosThread.find({ latest_status: "active" }).lean();
-    const rows = [];
-    for (const thread of threads) {
-      const event = await SosEvent.findOne({ thread_id: thread.public_id, latitude: { $ne: null }, longitude: { $ne: null } }).sort({ created_at: -1, public_id: -1 }).lean();
-      if (event) rows.push({ sos_id: thread.root_event_id, user_id: thread.user_id, latitude: event.latitude, longitude: event.longitude, address: event.address, message: event.message, status: thread.latest_status, created_at: event.created_at });
-    }
-    return rows;
-  }
+  const threads = await SosRecord.find({ record_type: "case", latest_status: "active" }).lean();
+  const events = await SosRecord.find({ record_type: "event", thread_id: { $in: threads.map((thread) => thread._id) }, latitude: { $ne: null }, longitude: { $ne: null } }).sort({ created_at: -1, _id: -1 }).lean();
+  const latestByThread = new Map();
+  for (const event of events) if (!latestByThread.has(event.thread_id.toString())) latestByThread.set(event.thread_id.toString(), event);
+  return threads.flatMap((thread) => {
+    const event = latestByThread.get(thread._id.toString());
+    return event ? [{ sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), latitude: event.latitude, longitude: event.longitude, address: event.address, message: event.message, status: thread.latest_status, created_at: event.created_at }] : [];
+  });
 }
 
 export async function appendThreadStatusEvent({ thread, sosId, threadUpdates, event, createdAt = new Date() }) {
-  const eventId = await Counter.nextPublicId("sos_events");
+  const rootId = parseObjectId(sosId);
   const session = await mongoose.startSession();
   let created;
   try {
     await session.withTransaction(async () => {
-      const latest = await SosEvent.findOne({ thread_id: thread.public_id })
-        .sort({ created_at: -1, public_id: -1 })
+      const latest = await SosRecord.findOne({ thread_id: thread._id, record_type: "event" })
+        .sort({ created_at: -1, _id: -1 })
         .session(session)
         .lean();
-      const result = await SosThread.updateOne(
-        { public_id: thread.public_id, latest_status: "active" },
+      const result = await SosRecord.updateOne(
+        { _id: thread._id, record_type: "case", latest_status: "active" },
         { $set: { ...threadUpdates, updated_at: createdAt } },
         { session }
       );
       if (result.modifiedCount !== 1) {
         throw Object.assign(new Error("SOS thread is no longer active"), { statusCode: 409 });
       }
-      [created] = await SosEvent.create([{
-        public_id: eventId,
-        thread_id: thread.public_id,
-        sos_id: Number(sosId),
+      [created] = await SosRecord.create([{
+        record_type: "event",
+        thread_id: thread._id,
+        sos_id: rootId,
         user_id: event.user_id ?? thread.user_id,
         latitude: latest?.latitude,
         longitude: latest?.longitude,
@@ -218,8 +224,8 @@ export async function createSosThreadWithRootEvent({ event, thread }) {
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      await SosEvent.create([event], { session });
-      await SosThread.create([thread], { session });
+      await SosRecord.create([{ ...event, record_type: "event" }], { session });
+      await SosRecord.create([{ ...thread, record_type: "case" }], { session });
     });
   } finally {
     await session.endSession();

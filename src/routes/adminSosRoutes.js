@@ -19,7 +19,8 @@ import {
   writeSnapshotToStream
 } from "../services/sosLiveOps.js";
 import { notifySosFriendsTerminalEvent, notifyUserLifecycleEvent } from "../services/userNotifications.js";
-import { SosThread } from "../models/Remaining.js";
+import { SosRecord } from "../models/Reduced.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 const router = express.Router();
 const MAX_NOTE_LENGTH = 1000;
@@ -29,14 +30,6 @@ const VALID_ASSIGNED_UNITS = new Set([
   "Police Personnel",
   "Traffic Enforcement Unit"
 ]);
-
-function parsePositiveInt(value) {
-  const num = Number(value);
-  if (!Number.isInteger(num) || num <= 0) {
-    return null;
-  }
-  return num;
-}
 
 function parseOptionalNote(body) {
   if (body?.note == null) {
@@ -102,7 +95,7 @@ function buildActionResponse(thread) {
 function getRequestTrace(req, overrides = {}) {
   return {
     requestId: req.get?.("x-request-id") || randomUUID(),
-    adminId: Number(req.admin?.adminId ?? null),
+    adminId: req.admin?.adminId ?? null,
     ...overrides,
   };
 }
@@ -143,7 +136,7 @@ router.get("/admin/sos/live/stream", requireAdminAuth, requirePermission("manage
   openSseStream(res);
   const unsubscribe = subscribeSse(res);
 
-  const lastEventId = parsePositiveInt(req.get("Last-Event-ID"));
+  const lastEventId = Number(req.get("Last-Event-ID"));
   if (lastEventId) {
     const replayResult = replaySince(lastEventId, res);
     if (replayResult.missed) {
@@ -185,14 +178,14 @@ router.get("/admin/sos/live/stream", requireAdminAuth, requirePermission("manage
 });
 
 router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
-  const sosId = parsePositiveInt(req.params.sosId);
+  const sosId = parseObjectId(req.params.sosId);
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });
   }
   const trace = getRequestTrace(req, {
     action: "admin_sos_acknowledge",
     entityType: "sos",
-    entityId: sosId,
+    entityId: sosId.toString(),
   });
 
   const note = parseOptionalNote(req.body);
@@ -206,15 +199,15 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, requirePermission
 
   {
     try {
-      const thread = await SosThread.findOne({ root_event_id: sosId }).lean();
+      const thread = await SosRecord.findOne({ root_event_id: sosId, record_type: "case" }).lean();
       if (!thread) return res.status(404).json({ message: "SOS thread not found" });
       if (thread.latest_status === "resolved") return res.status(409).json({ message: "SOS thread is already resolved" });
       const now = new Date();
       await appendThreadStatusEvent({
         thread,
         sosId,
-        threadUpdates: { acknowledged_at: now, acknowledged_by_admin_id: Number(req.admin.adminId), assigned_unit: assignedUnit },
-        event: { user_id: thread.user_id, status: "active", actor_type: "admin", actor_admin_id: Number(req.admin.adminId), event_type: "admin_acknowledged", message: typeof note === "string" ? note : undefined },
+        threadUpdates: { acknowledged_at: now, acknowledged_by_admin_id: parseObjectId(req.admin.adminId), assigned_unit: assignedUnit },
+        event: { user_id: thread.user_id, status: "active", actor_type: "admin", actor_admin_id: parseObjectId(req.admin.adminId), event_type: "admin_acknowledged", message: typeof note === "string" ? note : undefined },
         createdAt: now,
       });
       recordAckMetric();
@@ -229,14 +222,14 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, requirePermission
 });
 
 router.post("/admin/sos/:sosId/resolve", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
-  const sosId = parsePositiveInt(req.params.sosId);
+  const sosId = parseObjectId(req.params.sosId);
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });
   }
   const trace = getRequestTrace(req, {
     action: "admin_sos_resolve",
     entityType: "sos",
-    entityId: sosId,
+    entityId: sosId.toString(),
   });
 
   const note = parseOptionalNote(req.body);
@@ -247,7 +240,7 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, requirePermission("ma
 
   {
     try {
-      const thread = await SosThread.findOne({ root_event_id: sosId }).lean();
+      const thread = await SosRecord.findOne({ root_event_id: sosId, record_type: "case" }).lean();
       if (!thread) return res.status(404).json({ message: "SOS thread not found" });
       if (thread.latest_status === "resolved") { const current = await getThreadStateAnyStatus(sosId); return res.json(buildActionResponse(current)); }
       if (thread.latest_status !== "active") return res.status(409).json({ message: `Cannot resolve SOS in status '${thread.latest_status}'` });
@@ -256,7 +249,7 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, requirePermission("ma
         thread,
         sosId,
         threadUpdates: { latest_status: "resolved", resolved_at: now, terminal_status: terminalOutcome === "resolved" ? null : terminalOutcome },
-        event: { user_id: thread.user_id, status: terminalOutcome, actor_type: "admin", actor_admin_id: Number(req.admin.adminId), event_type: "status_update", message: typeof note === "string" ? note : undefined },
+        event: { user_id: thread.user_id, status: terminalOutcome, actor_type: "admin", actor_admin_id: parseObjectId(req.admin.adminId), event_type: "status_update", message: typeof note === "string" ? note : undefined },
         createdAt: now,
       });
       recordResolveMetric();
@@ -272,7 +265,7 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, requirePermission("ma
 });
 
 router.get("/admin/sos/:sosId", requireAdminAuth, requirePermission("manage_sos"), async (req, res) => {
-  const sosId = parsePositiveInt(req.params.sosId);
+  const sosId = parseObjectId(req.params.sosId);
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });
   }

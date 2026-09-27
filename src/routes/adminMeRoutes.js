@@ -1,6 +1,6 @@
 import express from "express";
 import { requireAuth } from "../middleware/adminAuth.js";
-import { AdminAccount } from "../models/Remaining.js";
+import { AdminRecord } from "../models/Reduced.js";
 
 const router = express.Router();
 
@@ -13,15 +13,14 @@ router.get("/admin/me", requireAuth, async (req, res) => {
     const adminId = req.admin.adminId;
     if (!adminId) return res.status(401).json({ message: "UNAUTHORIZED" });
 
-    const admin = await AdminAccount.findOne({ public_id: adminId }).lean();
+    const admin = await AdminRecord.findOne({ _id: adminId, record_type: "account" }).lean();
     if (!admin) return res.status(401).json({ message: "UNAUTHORIZED" });
     return res.json({
-      id: Number(admin.public_id),
+      id: admin._id.toString(),
       email: admin.email,
       full_name: admin.full_name,
-      role_id: admin.role_id,
       role: admin.role,
-      permissions: admin.permission_names ?? [],
+      permissions: admin.permissions ?? [],
     });
   } catch (e) {
     console.error(e);

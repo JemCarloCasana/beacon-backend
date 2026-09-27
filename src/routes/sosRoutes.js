@@ -1,11 +1,11 @@
 import express from "express";
+import mongoose from "mongoose";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import admin from "../firebaseAdmin.js";
 import { appendThreadStatusEvent, createSosThreadWithRootEvent, publishSosDeltaBySosId } from "../services/sosLiveOps.js";
-import { AdminNotification } from "../models/AdminNotification.js";
-import { Counter } from "../models/Counter.js";
-import { UserProfile, AdminAccount, Friendship, Device, SosThread, SosEvent } from "../models/Remaining.js";
+import { AdminRecord, FriendConnection, Notification, ReducedUserProfile as UserProfile, SosRecord } from "../models/Reduced.js";
 import { findProfileByUid } from "../services/userProfiles.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 const router = express.Router();
 const SOS_CATEGORIES = new Set(["medical", "fire", "violence", "unknown"]);
@@ -25,10 +25,10 @@ async function notifyAdminsAboutSos({ sosId, fullName, category }) {
   const senderName = typeof fullName === "string" && fullName.trim() ? fullName.trim() : "Unknown";
   const alertMessage = `${senderName} created an SOS (${category}).`;
 
-  const adminIds = (await AdminAccount.find({ status: "active" }).select({ public_id: 1 }).lean()).map((row) => Number(row.public_id));
+  const adminIds = (await AdminRecord.find({ record_type: "account", status: "active" }).select({ _id: 1 }).lean()).map((row) => row._id);
   if (adminIds.length === 0) {
     console.warn("[sos-routes] No active admin recipients for SOS notification", {
-      sosId: Number(sosId)
+      sosId: sosId.toString()
     });
     return;
   }
@@ -36,40 +36,34 @@ async function notifyAdminsAboutSos({ sosId, fullName, category }) {
   const docs = [];
   for (const recipientAdminId of adminIds) {
     docs.push({
-      public_id: await Counter.nextPublicId("notifications"),
-      recipient_admin_id: recipientAdminId,
+      record_type: "admin",
+      recipient_type: "admin",
+      recipient_id: recipientAdminId,
       type: "sos",
       title: alertTitle,
       message: alertMessage,
       metadata: {
-        reference_id: Number(sosId),
-        sos_id: Number(sosId),
-        fallback_route: `/admin/sos/${Number(sosId)}`,
+        reference_id: sosId.toString(),
+        sos_id: sosId.toString(),
+        fallback_route: `/admin/sos/${sosId.toString()}`,
       },
+      source: { type: "sos_record", id: sosId },
       is_read: false,
       created_at: new Date(),
     });
   }
-  const insertedDocs = await AdminNotification.insertMany(docs, { ordered: false });
+  const insertedDocs = await Notification.insertMany(docs, { ordered: false });
   const recipientCount = Array.isArray(insertedDocs) ? insertedDocs.length : 0;
   logDebug("notifications.insert", {
-    sosId: Number(sosId),
+    sosId: sosId.toString(),
     category,
     recipientCount
   });
   if (recipientCount === 0) {
     console.warn("[sos-routes] No active admin recipients for SOS notification", {
-      sosId: Number(sosId)
+      sosId: sosId.toString()
     });
   }
-}
-
-function parsePositiveInt(value) {
-  const num = Number(value);
-  if (!Number.isInteger(num) || num <= 0) {
-    return null;
-  }
-  return num;
 }
 
 function parseOptionalResolvedAt(value) {
@@ -122,33 +116,35 @@ router.post("/sos", requireAppAuth, async (req, res) => {
 
   const mongoProfile = await findProfileByUid(uid);
   if (!mongoProfile) return res.status(404).json({ message: "User not found" });
-  const userId = Number(mongoProfile.public_id);
+  const userId = mongoProfile._id;
   const fullName = mongoProfile.full_name || "Unknown";
   {
     try {
-      const eventId = await Counter.nextPublicId("sos_events");
-      const threadId = await Counter.nextPublicId("sos_threads");
+      const eventId = new mongoose.Types.ObjectId();
+      const threadId = new mongoose.Types.ObjectId();
       const now = new Date();
       await createSosThreadWithRootEvent({
-        event: { public_id: eventId, user_id: userId, sos_id: eventId, thread_id: threadId, latitude: latitude ?? undefined, longitude: longitude ?? undefined, address: address ?? undefined, message: message ?? undefined, status: "active", actor_type: "user", event_type: "report_created", emergency_category: normalizedCategory, created_at: now },
-        thread: { public_id: threadId, root_event_id: eventId, user_id: userId, latest_status: "active", emergency_category: normalizedCategory, created_at: now, updated_at: now },
+        event: { _id: eventId, user_id: userId, sos_id: eventId, thread_id: threadId, latitude: latitude ?? undefined, longitude: longitude ?? undefined, address: address ?? undefined, message: message ?? undefined, status: "active", actor_type: "user", event_type: "report_created", emergency_category: normalizedCategory, created_at: now },
+        thread: { _id: threadId, root_event_id: eventId, user_id: userId, latest_status: "active", emergency_category: normalizedCategory, created_at: now, updated_at: now },
       });
       publishSosDeltaBySosId(eventId).catch(() => {});
       await notifyAdminsAboutSos({ sosId: eventId, fullName, category: normalizedCategory }).catch(() => {});
-      const friendIds = (await Friendship.find({ $or: [{ user_id: userId }, { friend_user_id: userId }] }).lean()).map((row) => Number(row.user_id) === userId ? Number(row.friend_user_id) : Number(row.user_id));
-      const tokens = friendIds.length ? (await Device.find({ user_id: { $in: friendIds }, is_active: true, fcm_token: { $exists: true, $ne: "" } }).distinct("fcm_token")) : [];
-      if (!tokens.length) return res.status(200).json({ sos_id: String(eventId), category: normalizedCategory, notified_users: friendIds.length, notified_devices: 0, message: friendIds.length ? "SOS created, but no device tokens found for your friends." : "SOS created, but you have no Beacon friends to notify." });
+      const friendshipRows = await FriendConnection.find({ record_type: "friendship", user_ids: userId }).lean();
+      const friendIds = [...new Map(friendshipRows.flatMap((row) => row.user_ids.filter((id) => !id.equals(userId)).map((id) => [id.toString(), id]))).values()];
+      const friends = friendIds.length ? await UserProfile.find({ _id: { $in: friendIds } }).select({ devices: 1 }).lean() : [];
+      const tokens = [...new Set(friends.flatMap((friend) => friend.devices).filter((device) => device.is_active).map((device) => device.fcm_token).filter(Boolean))];
+      if (!tokens.length) return res.status(200).json({ sos_id: eventId.toString(), category: normalizedCategory, notified_users: friendIds.length, notified_devices: 0, message: friendIds.length ? "SOS created, but no device tokens found for your friends." : "SOS created, but you have no Beacon friends to notify." });
       try {
-        const resp = await admin.messaging().sendEachForMulticast({ tokens, notification: { title: "SOS Alert", body: `${fullName} needs help. Tap to view details.` }, data: { type: "SOS", sos_id: String(eventId), category: normalizedCategory, sender_name: String(fullName), sender_user_id: String(userId) }, android: { priority: "high" } });
-        return res.status(200).json({ sos_id: String(eventId), category: normalizedCategory, notified_users: friendIds.length, notified_devices: resp.successCount, failed_devices: resp.failureCount });
-      } catch { return res.status(200).json({ sos_id: String(eventId), category: normalizedCategory, notified_users: friendIds.length, notified_devices: 0, message: "SOS created, but push notification failed." }); }
+        const resp = await admin.messaging().sendEachForMulticast({ tokens, notification: { title: "SOS Alert", body: `${fullName} needs help. Tap to view details.` }, data: { type: "SOS", sos_id: eventId.toString(), category: normalizedCategory, sender_name: String(fullName), sender_user_id: userId.toString() }, android: { priority: "high" } });
+        return res.status(200).json({ sos_id: eventId.toString(), category: normalizedCategory, notified_users: friendIds.length, notified_devices: resp.successCount, failed_devices: resp.failureCount });
+      } catch { return res.status(200).json({ sos_id: eventId.toString(), category: normalizedCategory, notified_users: friendIds.length, notified_devices: 0, message: "SOS created, but push notification failed." }); }
     } catch (err) { console.error("Create Mongo SOS event error:", err); return res.status(500).json({ message: "Failed to create SOS event" }); }
   }
 
 });
 
 router.patch("/sos/:sosId/status", requireAppAuth, async (req, res) => {
-  const sosId = parsePositiveInt(req.params.sosId);
+  const sosId = parseObjectId(req.params.sosId);
   if (!sosId) {
     return res.status(400).json({ message: "Invalid sosId" });
   }
@@ -173,11 +169,11 @@ router.patch("/sos/:sosId/status", requireAppAuth, async (req, res) => {
   const mongoUser = await findProfileByUid(req.auth.uid);
   if (!mongoUser) return res.status(404).json({ message: "User not found" });
   {
-    const userId = Number(mongoUser.public_id);
-    const thread = await SosThread.findOne({ root_event_id: sosId }).lean();
+    const userId = mongoUser._id;
+    const thread = await SosRecord.findOne({ root_event_id: sosId, record_type: "case" }).lean();
     if (!thread) return res.status(404).json({ message: "SOS thread not found" });
-    if (Number(thread.user_id) !== userId) {
-      const friendship = await Friendship.exists({ $or: [{ user_id: userId, friend_user_id: thread.user_id }, { user_id: thread.user_id, friend_user_id: userId }] });
+    if (!thread.user_id.equals(userId)) {
+      const friendship = await FriendConnection.exists({ record_type: "friendship", user_ids: { $all: [userId, thread.user_id] } });
       if (!friendship) return res.status(403).json({ message: "Forbidden" });
     }
     if (thread.latest_status !== "active") return res.status(409).json({ message: `Cannot update SOS in status '${thread.latest_status}'` });
@@ -195,7 +191,7 @@ router.patch("/sos/:sosId/status", requireAppAuth, async (req, res) => {
       throw err;
     }
     publishSosDeltaBySosId(sosId).catch(() => {});
-    return res.status(200).json({ sos_id: String(sosId), status, resolved_at: resolvedAt });
+    return res.status(200).json({ sos_id: sosId.toString(), status, resolved_at: resolvedAt });
   }
 });
 

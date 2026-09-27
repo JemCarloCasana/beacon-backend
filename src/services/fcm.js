@@ -1,36 +1,33 @@
 import { initializeApp, applicationDefault, getApps } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
-import { BroadcastDelivery } from "../models/BroadcastDelivery.js";
-import { Device } from "../models/Remaining.js";
+import { Notification, ReducedUserProfile as UserProfile } from "../models/Reduced.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 if (!getApps().length) {
   initializeApp({ credential: applicationDefault() });
 }
 
-export async function sendBroadcastPush({ broadcastId = null, broadcastPublicId = null, title, body, data = {} }) {
-  const targetPublicId = Number(broadcastPublicId ?? broadcastId);
+export async function sendBroadcastPush({ broadcastId, title, body, data = {} }) {
   const result = { successCount: 0, failureCount: 0, removedTokensCount: 0 };
   let stage = "recipient_lookup";
   const recordError = () => {
     result.error = "Push delivery incomplete";
-    console.error("Broadcast push failure", { broadcastId: targetPublicId, stage });
+    console.error("Broadcast push failure", { broadcastId, stage });
   };
   try {
-    // A missing/invalid ID must never widen the audience to every device.
-    if (!Number.isSafeInteger(targetPublicId) || targetPublicId <= 0) {
+    if (typeof broadcastId !== "string" || !/^[a-f\d]{24}$/i.test(broadcastId)) {
       recordError();
       return result;
     }
-    const deliveries = await BroadcastDelivery.find(
-      { broadcast_public_id: targetPublicId }, { recipient_user_id: 1 }
+    const deliveries = await Notification.find(
+      { record_type: "broadcast_delivery", "source.type": "broadcast", "source.id": parseObjectId(broadcastId) }, { recipient_id: 1 }
     ).lean();
-    const recipientIds = [...new Set(deliveries.map((entry) => Number(entry.recipient_user_id))
-      .filter((id) => Number.isSafeInteger(id) && id > 0))];
+    const recipientIds = [...new Map(deliveries.map((entry) => [entry.recipient_id.toString(), entry.recipient_id])).values()];
     if (!recipientIds.length) return result;
 
     stage = "device_lookup";
-    const deviceRows = await Device.find({ user_id: { $in: recipientIds }, platform: "android", is_active: true }).select({ fcm_token: 1 }).lean();
-    const tokens = [...new Set(deviceRows.map((row) => row.fcm_token).filter(Boolean))];
+    const users = await UserProfile.find({ _id: { $in: recipientIds } }).select({ devices: 1 }).lean();
+    const tokens = [...new Set(users.flatMap((user) => user.devices).filter((device) => device.platform === "android" && device.is_active).map((device) => device.fcm_token).filter(Boolean))];
     const badTokens = [];
     for (let offset = 0; offset < tokens.length; offset += 500) {
       const batch = tokens.slice(offset, offset + 500);
@@ -56,7 +53,11 @@ export async function sendBroadcastPush({ broadcastId = null, broadcastPublicId 
     }
     if (badTokens.length) {
       stage = "token_cleanup";
-      await Device.updateMany({ fcm_token: { $in: badTokens } }, { $set: { is_active: false, updated_at: new Date() } });
+      await UserProfile.updateMany(
+        { "devices.fcm_token": { $in: badTokens } },
+        { $set: { "devices.$[device].is_active": false, "devices.$[device].updated_at": new Date() } },
+        { arrayFilters: [{ "device.fcm_token": { $in: badTokens } }] }
+      );
       result.removedTokensCount = badTokens.length;
     }
   } catch {

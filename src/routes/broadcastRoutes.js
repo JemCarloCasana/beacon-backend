@@ -3,43 +3,16 @@ import { findProfileByUid } from "../services/userProfiles.js";
 import { requireAdminAuth, requirePermission, getAdminPermissions } from "../middleware/adminAuth.js";
 import { requireAuth as requireFirebaseAuth } from "../middleware/requireAuth.js";
 import { sendBroadcastPush } from "../services/fcm.js";
-import { sendBroadcastByPublicId } from "../services/broadcastSend.js";
+import { sendBroadcastById } from "../services/broadcastSend.js";
 import { auditLog } from "../utils/auditLog.js";
-import { Broadcast, hasValidBroadcastAudience } from "../models/Broadcast.js";
-import { BroadcastDelivery } from "../models/BroadcastDelivery.js";
-import { Counter } from "../models/Counter.js";
-import { AdminAccount } from "../models/Remaining.js";
+import { AdminRecord, Notification, ReducedBroadcast as Broadcast, ReducedUserProfile as UserProfile } from "../models/Reduced.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 const router = express.Router();
 
 const ALLOWED_SEVERITIES = ["announcement", "warning", "danger"];
 const ALLOWED_AUDIENCE_TYPES = ["all", "role"];
 const ALLOWED_APP_AUDIENCE_ROLES = new Set(["citizen", "student"]);
-
-function parsePositiveInt(value) {
-  const num = Number(value);
-  if (!Number.isSafeInteger(num) || num <= 0) {
-    return null;
-  }
-  return num;
-}
-
-function normalizeRoleIds(audienceRoleIds) {
-  if (!Array.isArray(audienceRoleIds) || audienceRoleIds.length === 0) {
-    return null;
-  }
-
-  const normalized = [];
-  for (const roleId of audienceRoleIds) {
-    const num = Number(roleId);
-    if (!Number.isInteger(num) || num <= 0) {
-      return null;
-    }
-    normalized.push(num);
-  }
-
-  return [...new Set(normalized)];
-}
 
 function normalizeAudienceRoles(audienceRoles) {
   if (!Array.isArray(audienceRoles) || audienceRoles.length === 0) {
@@ -71,14 +44,13 @@ export function toBroadcastRow(doc) {
     return doc;
   }
   return {
-    id: doc.public_id,
+    id: doc._id.toString(),
     title: doc.title,
     body: doc.body,
     severity: doc.severity,
     audience_type: doc.audience_type,
     audience_roles: doc.audience_roles ?? null,
-    audience_role_ids: doc.audience_role_ids ?? null,
-    created_by_admin_id: doc.created_by_admin_id,
+    created_by_admin_id: doc.created_by_admin_id?.toString() ?? null,
     is_active: doc.is_active ?? true,
     sent_at: doc.sent_at ?? null,
     created_at: doc.created_at,
@@ -98,7 +70,7 @@ async function resolveAuthenticatedInboxUserId(req, res) {
     res.status(404).json({ message: "User account not found. Call /me/bootstrap first." });
     return null;
   }
-  return Number(profile.public_id);
+  return profile._id;
 }
 
 router.post(
@@ -107,8 +79,8 @@ router.post(
   requirePermission("manage_broadcasts"),
   async (req, res) => {
     try {
-      const adminId = Number(req.admin?.adminId);
-      if (!Number.isInteger(adminId) || adminId <= 0) {
+      const adminId = parseObjectId(req.admin?.adminId);
+      if (!adminId) {
         return res.status(401).json({ message: "Unauthorized" });
       }
 
@@ -133,7 +105,6 @@ router.post(
         return res.status(400).json({ message: "Invalid audience_type" });
       }
 
-      let audienceRoleIds = null;
       let audienceRoles = null;
       if (audienceType === "role") {
         if (hasOwnProperty(req.body, "audience_roles")) {
@@ -141,33 +112,22 @@ router.post(
           if (!audienceRoles) {
             return res.status(400).json({
               message:
-                "audience_roles must be a non-empty array containing only citizen/student. audience_role_ids is deprecated fallback.",
-            });
-          }
-        } else if (hasOwnProperty(req.body, "audience_role_ids")) {
-          audienceRoleIds = normalizeRoleIds(req.body?.audience_role_ids);
-          if (!audienceRoleIds) {
-            return res.status(400).json({
-              message:
-                "audience_role_ids must be a non-empty array of integers (deprecated). Prefer audience_roles.",
+                "audience_roles must be a non-empty array containing only citizen/student.",
             });
           }
         } else {
           return res.status(400).json({
-            message: "audience_roles is required when audience_type=role. audience_role_ids is deprecated fallback.",
+            message: "audience_roles is required when audience_type=role.",
           });
         }
       }
 
-      const publicId = await Counter.nextPublicId("broadcasts");
       const created = await Broadcast.create({
-        public_id: publicId,
         title,
         body,
         severity,
         audience_type: audienceType,
         ...(audienceRoles ? { audience_roles: audienceRoles } : {}),
-        ...(audienceRoleIds ? { audience_role_ids: audienceRoleIds } : {}),
         created_by_admin_id: adminId,
         is_active: true,
         sent_at: null,
@@ -178,7 +138,7 @@ router.post(
       auditLog({
         action: "broadcast.created",
         actor: adminId,
-        target: `broadcast:${publicId}`,
+        target: `broadcast:${created._id.toString()}`,
         outcome: "created",
       });
       return res.status(201).json(toBroadcastRow(createdRow));
@@ -198,14 +158,14 @@ router.post(
   requirePermission("manage_broadcasts"),
   async (req, res) => {
     try {
-      const broadcastId = parsePositiveInt(req.params.id);
+      const broadcastId = parseObjectId(req.params.id);
       if (!broadcastId) {
         return res.status(400).json({ message: "Invalid broadcast id" });
       }
 
       let outcome;
       try {
-        outcome = await sendBroadcastByPublicId(broadcastId);
+        outcome = await sendBroadcastById(broadcastId);
       } catch (err) {
         console.error("POST /admin/broadcasts/:id/send error:", err);
         return res.status(500).json({ message: "Server error" });
@@ -221,12 +181,12 @@ router.post(
 
       const broadcast = outcome.broadcast;
       const push = await sendBroadcastPush({
-        broadcastPublicId: broadcastId,
+        broadcastId: broadcastId.toString(),
         title: broadcast.title,
         body: broadcast.body,
         data: {
           type: "broadcast",
-          broadcast_id: broadcast.public_id,
+          broadcast_id: broadcast._id.toString(),
           severity: broadcast.severity ?? "",
           audience_type: broadcast.audience_type ?? "",
         },
@@ -234,15 +194,15 @@ router.post(
 
       auditLog({
         action: "broadcast.sent",
-        actor: Number(req.admin?.adminId),
-        target: `broadcast:${broadcastId}`,
+        actor: req.admin?.adminId,
+        target: `broadcast:${broadcastId.toString()}`,
         outcome: "sent",
         details: { deliveredCount: outcome.deliveredCount },
       });
 
       return res.json({
         ok: true,
-        broadcast_id: broadcastId,
+        broadcast_id: broadcastId.toString(),
         sent_at: broadcast.sent_at,
         delivered_count: outcome.deliveredCount,
         push,
@@ -256,12 +216,12 @@ router.post(
 
 router.get("/admin/broadcasts", requireAdminAuth, async (req, res) => {
   try {
-    const adminId = Number(req.admin?.adminId);
-    if (!Number.isInteger(adminId) || adminId <= 0) {
+    const adminId = parseObjectId(req.admin?.adminId);
+    if (!adminId) {
       return res.status(401).json({ message: "Unauthorized" });
     }
 
-    const permissions = await getAdminPermissions(adminId);
+    const permissions = await getAdminPermissions(adminId.toString());
     if (permissions.length > 0 && !permissions.includes("view_broadcasts")) {
       return res.status(403).json({ message: "Insufficient permissions" });
     }
@@ -294,7 +254,7 @@ router.get("/admin/broadcasts/my/inbox", requireFirebaseAuth, async (req, res) =
       return;
     }
 
-    const deliveries = await BroadcastDelivery.find({ recipient_user_id: userId })
+    const deliveries = await Notification.find({ record_type: "broadcast_delivery", recipient_id: userId })
       .sort({ delivered_at: -1 })
       .lean();
 
@@ -302,13 +262,13 @@ router.get("/admin/broadcasts/my/inbox", requireFirebaseAuth, async (req, res) =
       return res.json([]);
     }
 
-    const broadcastIds = [...new Set(deliveries.map((entry) => String(entry.broadcast_id)))];
+    const broadcastIds = [...new Map(deliveries.map((entry) => [entry.source.id.toString(), entry.source.id])).values()];
     const broadcasts = await Broadcast.find({ _id: { $in: broadcastIds } }).lean();
-    const broadcastById = new Map(broadcasts.map((entry) => [String(entry._id), entry]));
+    const broadcastById = new Map(broadcasts.map((entry) => [entry._id.toString(), entry]));
 
     const inbox = [];
     for (const delivery of deliveries) {
-      const broadcast = broadcastById.get(String(delivery.broadcast_id));
+      const broadcast = broadcastById.get(delivery.source.id.toString());
       if (!broadcast) {
         continue;
       }
@@ -328,7 +288,7 @@ router.get("/admin/broadcasts/my/inbox", requireFirebaseAuth, async (req, res) =
 
 router.post("/admin/broadcasts/:id/ack", requireFirebaseAuth, async (req, res) => {
   try {
-    const broadcastId = parsePositiveInt(req.params.id);
+    const broadcastId = parseObjectId(req.params.id);
 
     if (!broadcastId) {
       return res.status(400).json({ message: "Invalid broadcast id" });
@@ -339,14 +299,14 @@ router.post("/admin/broadcasts/:id/ack", requireFirebaseAuth, async (req, res) =
       return;
     }
 
-    const broadcast = await Broadcast.findOne({ public_id: broadcastId }).lean();
+    const broadcast = await Broadcast.findById(broadcastId).lean();
 
     if (!broadcast) {
       return res.status(404).json({ message: "Broadcast not found" });
     }
 
-    const delivery = await BroadcastDelivery.findOneAndUpdate(
-      { broadcast_public_id: broadcastId, recipient_user_id: userId },
+    const delivery = await Notification.findOneAndUpdate(
+      { record_type: "broadcast_delivery", "source.type": "broadcast", "source.id": broadcastId, recipient_id: userId },
       [{ $set: { acknowledged_at: { $ifNull: ["$acknowledged_at", "$$NOW"] } } }],
       { new: true, updatePipeline: true }
     ).lean();
@@ -357,7 +317,7 @@ router.post("/admin/broadcasts/:id/ack", requireFirebaseAuth, async (req, res) =
 
     return res.json({
       ok: true,
-      broadcast_id: broadcastId,
+      broadcast_id: broadcastId.toString(),
       acknowledged_at: delivery.acknowledged_at,
     });
   } catch (err) {
@@ -372,7 +332,7 @@ router.patch(
   requirePermission("manage_broadcasts"),
   async (req, res) => {
     try {
-      const broadcastId = parsePositiveInt(req.params.id);
+      const broadcastId = parseObjectId(req.params.id);
       if (!broadcastId) {
         return res.status(400).json({ message: "Invalid broadcast id" });
       }
@@ -387,7 +347,6 @@ router.patch(
         "severity",
         "audience_type",
         "audience_roles",
-        "audience_role_ids",
       ]);
       for (const key of Object.keys(body)) {
         if (!allowedFields.has(key)) {
@@ -398,7 +357,7 @@ router.patch(
         return res.status(400).json({ message: "No updatable fields provided" });
       }
 
-      const existing = await Broadcast.findOne({ public_id: broadcastId }).lean();
+      const existing = await Broadcast.findById(broadcastId).lean();
       if (!existing) {
         return res.status(404).json({ message: "Broadcast not found" });
       }
@@ -448,35 +407,20 @@ router.patch(
       }
 
       if (effectiveAudienceType === "all") {
-        if (hasOwnProperty(body, "audience_roles") || hasOwnProperty(body, "audience_role_ids")) {
+        if (hasOwnProperty(body, "audience_roles")) {
           return res.status(400).json({
-            message: "audience_roles and audience_role_ids are only allowed when audience_type=role",
+            message: "audience_roles is only allowed when audience_type=role",
           });
         }
         unsetFields.audience_roles = "";
-        unsetFields.audience_role_ids = "";
-      } else if (hasOwnProperty(body, "audience_roles") || hasOwnProperty(body, "audience_role_ids")) {
-        if (hasOwnProperty(body, "audience_roles")) {
+      } else if (hasOwnProperty(body, "audience_roles")) {
           const audienceRoles = normalizeAudienceRoles(body.audience_roles);
           if (!audienceRoles) {
             return res.status(400).json({
-              message:
-                "audience_roles must be a non-empty array containing only citizen/student. audience_role_ids is deprecated fallback.",
+              message: "audience_roles must be a non-empty array containing only citizen/student.",
             });
           }
           setFields.audience_roles = audienceRoles;
-          unsetFields.audience_role_ids = "";
-        } else {
-          const audienceRoleIds = normalizeRoleIds(body.audience_role_ids);
-          if (!audienceRoleIds) {
-            return res.status(400).json({
-              message:
-                "audience_role_ids must be a non-empty array of integers (deprecated). Prefer audience_roles.",
-            });
-          }
-          setFields.audience_role_ids = audienceRoleIds;
-          unsetFields.audience_roles = "";
-        }
       }
 
       if (Object.keys(setFields).length === 0 && Object.keys(unsetFields).length === 0) {
@@ -486,7 +430,7 @@ router.patch(
       setFields.updated_at = new Date();
       const candidate = { ...existing, ...setFields };
       for (const key of Object.keys(unsetFields)) delete candidate[key];
-      if (!hasValidBroadcastAudience(candidate)) {
+      if (candidate.audience_type === "role" && (!Array.isArray(candidate.audience_roles) || candidate.audience_roles.length === 0 || !candidate.audience_roles.every((role) => ALLOWED_APP_AUDIENCE_ROLES.has(role)))) {
         return res.status(400).json({ message: "Role audience requires a valid recipient selector" });
       }
       const update = { $set: setFields };
@@ -496,25 +440,24 @@ router.patch(
 
       const updated = await Broadcast.findOneAndUpdate(
         {
-          public_id: broadcastId, sent_at: null,
+          _id: broadcastId, sent_at: null,
           audience_type: existing.audience_type,
           audience_roles: existing.audience_roles ?? null,
-          audience_role_ids: existing.audience_role_ids ?? null,
         },
         update,
         { new: true, runValidators: true }
       ).lean();
 
       if (!updated) {
-        const current = await Broadcast.findOne({ public_id: broadcastId }).lean();
+        const current = await Broadcast.findById(broadcastId).lean();
         if (!current) return res.status(404).json({ message: "Broadcast not found" });
         return res.status(409).json({ message: current.sent_at != null ? "Broadcast already sent" : "Broadcast changed; reload and retry" });
       }
 
       auditLog({
         action: "broadcast.edited",
-        actor: Number(req.admin?.adminId),
-        target: `broadcast:${broadcastId}`,
+        actor: req.admin?.adminId,
+        target: `broadcast:${broadcastId.toString()}`,
         outcome: "updated",
       });
 
@@ -535,7 +478,7 @@ router.delete(
   requirePermission("manage_broadcasts"),
   async (req, res, next) => {
     try {
-      const admin = await AdminAccount.findOne({ public_id: req.admin.adminId })
+      const admin = await AdminRecord.findOne({ _id: req.admin.adminId, record_type: "account" })
         .select({ role: 1 })
         .lean();
       const role = admin?.role;
@@ -557,34 +500,34 @@ router.delete(
   },
   async (req, res) => {
     try {
-      const broadcastId = parsePositiveInt(req.params.id);
+      const broadcastId = parseObjectId(req.params.id);
       if (!broadcastId) {
         return res.status(400).json({ message: "Invalid broadcast id" });
       }
 
       const deleted = await Broadcast.findOneAndDelete({
-        public_id: broadcastId,
+        _id: broadcastId,
         sent_at: null,
       }).lean();
 
       if (!deleted) {
-        const existing = await Broadcast.findOne({ public_id: broadcastId }).lean();
+        const existing = await Broadcast.findById(broadcastId).lean();
         if (!existing) {
           return res.status(404).json({ message: "Broadcast not found" });
         }
         return res.status(409).json({ message: "Broadcast already sent" });
       }
 
-      await BroadcastDelivery.deleteMany({ broadcast_public_id: broadcastId });
+      await Notification.deleteMany({ record_type: "broadcast_delivery", "source.id": broadcastId });
 
       auditLog({
         action: "broadcast.deleted",
-        actor: Number(req.admin?.adminId),
-        target: `broadcast:${broadcastId}`,
+        actor: req.admin?.adminId,
+        target: `broadcast:${broadcastId.toString()}`,
         outcome: "deleted",
       });
 
-      return res.json({ ok: true, broadcast_id: broadcastId });
+      return res.json({ ok: true, broadcast_id: broadcastId.toString() });
     } catch (err) {
       console.error("DELETE /admin/broadcasts/:id error:", err);
       return res.status(500).json({ message: "Server error" });

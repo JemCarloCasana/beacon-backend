@@ -1,167 +1,94 @@
 import express from "express";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
-import { Counter } from "../models/Counter.js";
-import { EmergencyContact } from "../models/Remaining.js";
 import { findProfileByUid } from "../services/userProfiles.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 const router = express.Router();
-
 const PHONE_REGEX = /^(?:\+639\d{9}|09\d{9})$/;
 
 function normalizePH(phone) {
   if (!phone) return null;
-  const p = phone.replace(/\s+/g, "").replace(/-/g, "");
-  if (p.startsWith("09")) return "+63" + p.substring(1);
-  return p;
+  const value = phone.replace(/\s+/g, "").replace(/-/g, "");
+  return value.startsWith("09") ? `+63${value.substring(1)}` : value;
 }
 
-/**
- * GET /contacts
- * Returns ALL contacts for logged-in user, including relation + is_primary.
- */
+function contactDto(contact) {
+  return {
+    id: contact._id.toString(),
+    contact_name: contact.contact_name,
+    phone_number: contact.phone_number,
+    relation: contact.relation ?? null,
+    is_primary: Boolean(contact.is_primary),
+    created_at: contact.created_at,
+  };
+}
+
 router.get("/contacts", requireAppAuth, async (req, res) => {
-  const { uid } = req.auth;
-
-  const profile = await findProfileByUid(uid);
+  const profile = await findProfileByUid(req.auth.uid);
   if (!profile) return res.status(404).json({ message: "User not found" });
-  const contacts = await EmergencyContact.find({ owner_user_id: profile.public_id })
-    .sort({ is_primary: -1, created_at: -1 }).lean();
-  return res.json(contacts.map((contact) => ({
-    id: Number(contact.public_id), contact_name: contact.contact_name, phone_number: contact.phone_number,
-    relation: contact.relation ?? null, is_primary: Boolean(contact.is_primary), created_at: contact.created_at,
-  })));
+  const contacts = [...profile.emergency_contacts].sort((a, b) => Number(b.is_primary) - Number(a.is_primary) || b.created_at - a.created_at);
+  return res.json(contacts.map(contactDto));
 });
 
-/**
- * POST /contacts
- * Body: { contact_name, phone_number, relation?, is_primary? }
- */
 router.post("/contacts", requireAppAuth, async (req, res) => {
-  const { uid } = req.auth;
-  const { contact_name, phone_number, relation, is_primary } = req.body;
-
-  if (!contact_name || typeof contact_name !== "string" || contact_name.trim().length < 2) {
-    return res.status(400).json({ message: "Invalid contact_name" });
-  }
-
-  if (!phone_number || typeof phone_number !== "string" || !PHONE_REGEX.test(phone_number)) {
-    return res.status(400).json({ message: "Invalid phone_number" });
-  }
-
-  const normalized = normalizePH(phone_number);
-  const rel = typeof relation === "string" ? relation.trim() : null;
+  const { contact_name, phone_number, relation, is_primary } = req.body ?? {};
+  if (typeof contact_name !== "string" || contact_name.trim().length < 2) return res.status(400).json({ message: "Invalid contact_name" });
+  if (typeof phone_number !== "string" || !PHONE_REGEX.test(phone_number)) return res.status(400).json({ message: "Invalid phone_number" });
+  const profile = await findProfileByUid(req.auth.uid);
+  if (!profile) return res.status(404).json({ message: "User not found" });
+  const normalizedPhone = normalizePH(phone_number);
+  if (profile.emergency_contacts.some((contact) => contact.phone_number === normalizedPhone)) return res.status(409).json({ message: "Contact already exists" });
   const primary = typeof is_primary === "boolean" ? is_primary : false;
-
-  const profile = await findProfileByUid(uid);
-  if (!profile) return res.status(404).json({ message: "User not found" });
-  if (primary && await EmergencyContact.countDocuments({ owner_user_id: profile.public_id, is_primary: true }) >= 3) {
-    return res.status(400).json({ message: "Maximum of 3 primary contacts allowed" });
-  }
-
-  try {
-    const contact = await EmergencyContact.create({
-      public_id: await Counter.nextPublicId("emergency_contacts"), owner_user_id: profile.public_id,
-      contact_name: contact_name.trim(), phone_number: normalized, relation: rel, is_primary: primary,
-    });
-    return res.status(201).json({ id: contact.public_id, contact_name: contact.contact_name, phone_number: contact.phone_number, relation: contact.relation, is_primary: contact.is_primary, created_at: contact.created_at });
-  } catch (error) {
-    if (error?.code === 11000) {
-      return res.status(409).json({ message: "Contact already exists" });
-    }
-    throw error;
-  }
+  if (primary && profile.emergency_contacts.filter((contact) => contact.is_primary).length >= 3) return res.status(400).json({ message: "Maximum of 3 primary contacts allowed" });
+  profile.emergency_contacts.push({ contact_name: contact_name.trim(), phone_number: normalizedPhone, relation: typeof relation === "string" ? relation.trim() : null, is_primary: primary });
+  await profile.save();
+  return res.status(201).json(contactDto(profile.emergency_contacts.at(-1)));
 });
 
-/**
- * PATCH /contacts/:id
- * Body: { contact_name, phone_number, relation? }
- */
 router.patch("/contacts/:id", requireAppAuth, async (req, res) => {
-  const { uid } = req.auth;
-  const contactId = Number(req.params.id);
-
-  if (!Number.isFinite(contactId)) {
-    return res.status(400).json({ message: "Invalid id" });
-  }
-
-  const { contact_name, phone_number, relation } = req.body;
-
-  if (!contact_name || typeof contact_name !== "string" || contact_name.trim().length < 2) {
-    return res.status(400).json({ message: "Invalid contact_name" });
-  }
-
-  if (!phone_number || typeof phone_number !== "string" || !PHONE_REGEX.test(phone_number)) {
-    return res.status(400).json({ message: "Invalid phone_number" });
-  }
-
-  const normalized = normalizePH(phone_number);
-  const rel = typeof relation === "string" ? relation.trim() : null;
-
-  const profile = await findProfileByUid(uid);
+  const contactId = parseObjectId(req.params.id);
+  if (!contactId) return res.status(400).json({ message: "Invalid id" });
+  const { contact_name, phone_number, relation } = req.body ?? {};
+  if (typeof contact_name !== "string" || contact_name.trim().length < 2) return res.status(400).json({ message: "Invalid contact_name" });
+  if (typeof phone_number !== "string" || !PHONE_REGEX.test(phone_number)) return res.status(400).json({ message: "Invalid phone_number" });
+  const profile = await findProfileByUid(req.auth.uid);
   if (!profile) return res.status(404).json({ message: "User not found" });
-
-  try {
-    const contact = await EmergencyContact.findOneAndUpdate(
-      { public_id: contactId, owner_user_id: profile.public_id },
-      { $set: { contact_name: contact_name.trim(), phone_number: normalized, relation: rel, updated_at: new Date() } },
-      { returnDocument: "after", runValidators: true }
-    ).lean();
-    if (!contact) return res.status(404).json({ message: "Contact not found" });
-    return res.json({ id: contact.public_id, contact_name: contact.contact_name, phone_number: contact.phone_number, relation: contact.relation, is_primary: contact.is_primary, created_at: contact.created_at });
-  } catch (error) {
-    if (error?.code === 11000) {
-      return res.status(409).json({ message: "Contact already exists" });
-    }
-    throw error;
-  }
-});
-
-/**
- * PATCH /contacts/:id/primary
- * Body: { is_primary: boolean }
- * Sets/unsets primary status.
- */
-router.patch("/contacts/:id/primary", requireAppAuth, async (req, res) => {
-  const { uid } = req.auth;
-  const contactId = Number(req.params.id);
-
-  if (!Number.isFinite(contactId)) {
-    return res.status(400).json({ message: "Invalid id" });
-  }
-
-  const { is_primary } = req.body;
-  if (typeof is_primary !== "boolean") {
-    return res.status(400).json({ message: "Invalid is_primary" });
-  }
-
-  const profile = await findProfileByUid(uid);
-  if (!profile) return res.status(404).json({ message: "User not found" });
-  if (is_primary && await EmergencyContact.countDocuments({ owner_user_id: profile.public_id, is_primary: true, public_id: { $ne: contactId } }) >= 3) {
-    return res.status(400).json({ message: "Maximum of 3 primary contacts allowed" });
-  }
-  const contact = await EmergencyContact.findOneAndUpdate(
-    { public_id: contactId, owner_user_id: profile.public_id }, { $set: { is_primary } },
-    { returnDocument: "after", runValidators: true }
-  ).lean();
+  const contact = profile.emergency_contacts.id(contactId);
   if (!contact) return res.status(404).json({ message: "Contact not found" });
-  return res.json({ id: contact.public_id, contact_name: contact.contact_name, phone_number: contact.phone_number, relation: contact.relation, is_primary: contact.is_primary, created_at: contact.created_at });
+  const normalizedPhone = normalizePH(phone_number);
+  if (profile.emergency_contacts.some((item) => !item._id.equals(contactId) && item.phone_number === normalizedPhone)) return res.status(409).json({ message: "Contact already exists" });
+  contact.contact_name = contact_name.trim();
+  contact.phone_number = normalizedPhone;
+  contact.relation = typeof relation === "string" ? relation.trim() : null;
+  contact.updated_at = new Date();
+  await profile.save();
+  return res.json(contactDto(contact));
 });
 
-/**
- * DELETE /contacts/:id
- */
-router.delete("/contacts/:id", requireAppAuth, async (req, res) => {
-  const { uid } = req.auth;
-  const contactId = Number(req.params.id);
-
-  if (!Number.isFinite(contactId)) {
-    return res.status(400).json({ message: "Invalid id" });
-  }
-
-  const profile = await findProfileByUid(uid);
+router.patch("/contacts/:id/primary", requireAppAuth, async (req, res) => {
+  const contactId = parseObjectId(req.params.id);
+  if (!contactId) return res.status(400).json({ message: "Invalid id" });
+  if (typeof req.body?.is_primary !== "boolean") return res.status(400).json({ message: "Invalid is_primary" });
+  const profile = await findProfileByUid(req.auth.uid);
   if (!profile) return res.status(404).json({ message: "User not found" });
-  const deleted = await EmergencyContact.findOneAndDelete({ public_id: contactId, owner_user_id: profile.public_id }).lean();
-  if (!deleted) return res.status(404).json({ message: "Contact not found" });
+  const contact = profile.emergency_contacts.id(contactId);
+  if (!contact) return res.status(404).json({ message: "Contact not found" });
+  if (req.body.is_primary && profile.emergency_contacts.filter((item) => item.is_primary && !item._id.equals(contactId)).length >= 3) return res.status(400).json({ message: "Maximum of 3 primary contacts allowed" });
+  contact.is_primary = req.body.is_primary;
+  contact.updated_at = new Date();
+  await profile.save();
+  return res.json(contactDto(contact));
+});
+
+router.delete("/contacts/:id", requireAppAuth, async (req, res) => {
+  const contactId = parseObjectId(req.params.id);
+  if (!contactId) return res.status(400).json({ message: "Invalid id" });
+  const profile = await findProfileByUid(req.auth.uid);
+  if (!profile) return res.status(404).json({ message: "User not found" });
+  const contact = profile.emergency_contacts.id(contactId);
+  if (!contact) return res.status(404).json({ message: "Contact not found" });
+  contact.deleteOne();
+  await profile.save();
   return res.json({ ok: true });
 });
 

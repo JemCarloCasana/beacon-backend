@@ -1,7 +1,6 @@
 import express from "express";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
-import { Device } from "../models/Remaining.js";
-import { Counter } from "../models/Counter.js";
+import { ReducedUserProfile as UserProfile } from "../models/Reduced.js";
 import { findProfileByUid } from "../services/userProfiles.js";
 
 const router = express.Router();
@@ -18,13 +17,22 @@ router.post("/devices/register", requireAppAuth, async (req, res) => {
   const profile = await findProfileByUid(uid);
   if (!profile) return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
   try {
-    await Device.deleteMany({ fcm_token: token, user_id: { $ne: profile.public_id } });
-    await Device.findOneAndUpdate(
-      { user_id: profile.public_id, platform },
-      { $set: { fcm_token: token, is_active: true, updated_at: new Date() }, $setOnInsert: { public_id: await Counter.nextPublicId("devices") } },
-      { upsert: true, returnDocument: "after", runValidators: true }
+    await UserProfile.updateMany(
+      { _id: { $ne: profile._id }, "devices.fcm_token": token },
+      { $pull: { devices: { fcm_token: token } } }
     );
-    console.info("[devices] register.success", { userId: Number(profile.public_id), platform });
+    const tokenDevice = profile.devices.find((device) => device.fcm_token === token);
+    if (tokenDevice && tokenDevice.platform !== platform) return res.status(409).json({ message: "Device token already registered" });
+    const device = profile.devices.find((item) => item.platform === platform);
+    if (device) {
+      device.fcm_token = token;
+      device.is_active = true;
+      device.updated_at = new Date();
+    } else {
+      profile.devices.push({ fcm_token: token, platform, is_active: true });
+    }
+    await profile.save();
+    console.info("[devices] register.success", { userId: profile._id.toString(), platform });
     return res.json({ ok: true });
   } catch (error) {
     if (error?.code === 11000) return res.status(409).json({ message: "Device token already registered" });

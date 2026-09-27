@@ -1,5 +1,4 @@
-import { Counter } from "../models/Counter.js";
-import { UserProfile, Friendship, FriendRequest } from "../models/Remaining.js";
+import { ReducedUserProfile as UserProfile, FriendConnection } from "../models/Reduced.js";
 import { chooseBootstrapFullName } from "../utils/userNameFallbacks.js";
 
 const BEACON_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -15,7 +14,7 @@ function generateBeaconCode() {
 function profileToDto(profile) {
   if (!profile) return null;
   return {
-    id: Number(profile.public_id),
+    id: profile._id.toString(),
     firebase_uid: profile.firebase_uid,
     email: profile.email,
     full_name: profile.full_name,
@@ -31,9 +30,7 @@ function normalizeEmail(email, uid) {
 }
 
 async function insertProfile(fields) {
-  const publicId = await Counter.nextPublicId("users");
   const profile = await UserProfile.create({
-    public_id: publicId,
     firebase_uid: fields.firebase_uid,
     email: fields.email,
     full_name: fields.full_name,
@@ -136,8 +133,8 @@ export async function findProfileByUid(uid) {
   return UserProfile.findOne({ firebase_uid: uid });
 }
 
-export async function findProfileByPublicId(publicId) {
-  return UserProfile.findOne({ public_id: publicId });
+export async function findProfileById(id) {
+  return UserProfile.findById(id);
 }
 
 export async function searchProfiles({ uid, query, limit = 20 }) {
@@ -146,21 +143,21 @@ export async function searchProfiles({ uid, query, limit = 20 }) {
   const tokens = query.toLowerCase().split(" ").filter(Boolean);
   const escaped = tokens.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   const candidates = await UserProfile.find({
-    public_id: { $ne: me.public_id },
+    _id: { $ne: me._id },
     $and: escaped.map((token) => ({ full_name: new RegExp(token, "i") })),
-  }).select({ public_id: 1, full_name: 1, beacon_code: 1 }).limit(limit).lean();
+  }).select({ _id: 1, full_name: 1, beacon_code: 1 }).limit(limit).lean();
 
-  const ids = candidates.map((candidate) => Number(candidate.public_id));
+  const ids = candidates.map((candidate) => candidate._id);
   const [friendships, requests] = await Promise.all([
-    Friendship.find({ $or: [{ user_id: me.public_id, friend_user_id: { $in: ids } }, { friend_user_id: me.public_id, user_id: { $in: ids } }] }).lean(),
-    FriendRequest.find({ status: "pending", $or: [{ requester_user_id: me.public_id, addressee_user_id: { $in: ids } }, { addressee_user_id: me.public_id, requester_user_id: { $in: ids } }] }).lean(),
+    FriendConnection.find({ record_type: "friendship", user_ids: { $all: [me._id], $in: ids } }).lean(),
+    FriendConnection.find({ record_type: "request", status: "pending", user_ids: { $all: [me._id], $in: ids } }).lean(),
   ]);
 
   const result = candidates.map((candidate) => {
-    const id = Number(candidate.public_id);
-    const friend = friendships.some((row) => Number(row.user_id) === id || Number(row.friend_user_id) === id);
-    const incoming = requests.some((row) => Number(row.requester_user_id) === id);
-    const outgoing = requests.some((row) => Number(row.addressee_user_id) === id);
+    const id = candidate._id.toString();
+    const friend = friendships.some((row) => row.user_ids.some((value) => value.equals(candidate._id)));
+    const incoming = requests.some((row) => row.requested_by.equals(candidate._id));
+    const outgoing = requests.some((row) => row.recipient.equals(candidate._id));
     return {
       id,
       full_name: candidate.full_name,

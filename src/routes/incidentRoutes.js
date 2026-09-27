@@ -1,13 +1,11 @@
 import express from "express";
-import mongoose from "mongoose";
 import { randomUUID } from "node:crypto";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import { requireAdminAuth } from "../middleware/adminAuth.js";
 import { notifyUserLifecycleEvent } from "../services/userNotifications.js";
-import { AdminNotification } from "../models/AdminNotification.js";
-import { Counter } from "../models/Counter.js";
-import { UserProfile, AdminAccount, IncidentReport, IncidentEvidence } from "../models/Remaining.js";
+import { AdminRecord, Notification, ReducedIncidentReport as IncidentReport, ReducedUserProfile as UserProfile } from "../models/Reduced.js";
 import { findProfileByUid } from "../services/userProfiles.js";
+import { idString, parseObjectId } from "../utils/objectId.js";
 
 const router = express.Router();
 const MAX_IMAGES_PER_INCIDENT = 5;
@@ -28,10 +26,15 @@ function logDebug(event, payload) {
   console.debug(`[incident-routes] ${event}`, payload);
 }
 
+function parsePositiveInt(value) {
+  const num = Number(value);
+  return Number.isSafeInteger(num) && num > 0 ? num : null;
+}
+
 function getRequestTrace(req, overrides = {}) {
   return {
     requestId: req.get?.("x-request-id") || randomUUID(),
-    adminId: Number(req.admin?.adminId ?? null),
+    adminId: idString(req.admin?.adminId),
     ...overrides,
   };
 }
@@ -44,10 +47,10 @@ async function notifyAdminsAboutIncident({ incidentId, incidentType }) {
       : "incident";
   const message = `A new ${safeIncidentType} incident was reported.`;
 
-  const adminIds = (await AdminAccount.find({ status: "active" }).select({ public_id: 1 }).lean()).map((row) => Number(row.public_id));
+  const adminIds = (await AdminRecord.find({ record_type: "account", status: "active" }).select({ _id: 1 }).lean()).map((row) => row._id);
   if (adminIds.length === 0) {
     console.warn("[incident-routes] No active admin recipients for incident notification", {
-      incidentId: Number(incidentId)
+      incidentId: idString(incidentId)
     });
     return;
   }
@@ -55,40 +58,33 @@ async function notifyAdminsAboutIncident({ incidentId, incidentType }) {
   const docs = [];
   for (const recipientAdminId of adminIds) {
     docs.push({
-      public_id: await Counter.nextPublicId("notifications"),
-      recipient_admin_id: recipientAdminId,
+      record_type: "admin",
+      recipient_type: "admin",
+      recipient_id: recipientAdminId,
       type: "incident",
       title,
       message,
       metadata: {
-        reference_id: Number(incidentId),
-        incident_id: Number(incidentId),
-        fallback_route: `/admin/incidents/${Number(incidentId)}`,
+        reference_id: idString(incidentId),
+        incident_id: idString(incidentId),
+        fallback_route: `/admin/incidents/${idString(incidentId)}`,
       },
       is_read: false,
       created_at: new Date(),
     });
   }
-  const insertedDocs = await AdminNotification.insertMany(docs, { ordered: false });
+  const insertedDocs = await Notification.insertMany(docs, { ordered: false });
   const recipientCount = Array.isArray(insertedDocs) ? insertedDocs.length : 0;
   logDebug("notifications.insert", {
-    incidentId: Number(incidentId),
+    incidentId: idString(incidentId),
     incidentType: safeIncidentType,
     recipientCount
   });
   if (recipientCount === 0) {
     console.warn("[incident-routes] No active admin recipients for incident notification", {
-      incidentId: Number(incidentId)
+      incidentId: idString(incidentId)
     });
   }
-}
-
-function parsePositiveInt(value) {
-  const num = Number(value);
-  if (!Number.isInteger(num) || num <= 0) {
-    return null;
-  }
-  return num;
 }
 
 function toIso(value) {
@@ -129,24 +125,24 @@ function toIncidentImageUrl(incidentId, imageId, isAdminRoute = false) {
 function toIncidentDto(row, { isAdminRoute = false } = {}) {
   const imageRefs = toImageRefArray(row.images)
     .map((item) => ({
-      id: Number(item?.id),
+      id: idString(item?.id),
       sort_order: Number(item?.sort_order)
     }))
-    .filter((item) => Number.isInteger(item.id) && item.id > 0)
+    .filter((item) => item.id && Number.isFinite(item.sort_order))
     .sort((a, b) => {
       if (a.sort_order !== b.sort_order) {
         return a.sort_order - b.sort_order;
       }
-      return a.id - b.id;
+      return a.id.localeCompare(b.id);
     });
 
   const imageUrls = imageRefs.map((item) =>
-    toIncidentImageUrl(Number(row.id), item.id, isAdminRoute)
+    toIncidentImageUrl(idString(row.id), item.id, isAdminRoute)
   );
 
   // Canonical incident response uses snake_case for lifecycle timestamps and resolution fields.
   return {
-    id: Number(row.id),
+    id: idString(row.id),
     title: `Incident #${row.id}`,
     incident_type: row.incident_type ?? "",
     assigned_department: row.assigned_department ?? null,
@@ -162,7 +158,7 @@ function toIncidentDto(row, { isAdminRoute = false } = {}) {
     updated_at: toIso(row.updated_at),
     dispatched_at: toIso(row.dispatched_at),
     resolved_at: toIso(row.resolved_at),
-    reportedByUserId: row.user_id == null ? null : Number(row.user_id),
+    reportedByUserId: idString(row.user_id),
     resolution_notes: row.resolution_notes ?? null,
     image_url: imageUrls[0] ?? null,
     images: imageUrls
@@ -186,23 +182,19 @@ function canTransitionStatus(currentStatus, nextStatus) {
 
 async function listIncidents({ status, limit, offset }) {
   const filter = status ? { status } : {};
-  const reports = await IncidentReport.find(filter).sort({ created_at: -1, public_id: -1 }).skip(offset).limit(limit).lean();
-  const evidence = await IncidentEvidence.find({ incident_report_id: { $in: reports.map((row) => row.public_id) } }).sort({ sort_order: 1, public_id: 1 }).lean();
-  const byIncident = new Map();
-  for (const item of evidence) { const list = byIncident.get(Number(item.incident_report_id)) || []; list.push({ id: item.public_id, sort_order: item.sort_order }); byIncident.set(Number(item.incident_report_id), list); }
-  return reports.map((row) => ({ ...row, id: row.public_id, images: byIncident.get(Number(row.public_id)) || [] }));
+  const reports = await IncidentReport.find(filter).sort({ created_at: -1, _id: -1 }).skip(offset).limit(limit).lean();
+  return reports.map((row) => ({ ...row, id: row._id, images: row.evidence.map((item) => ({ id: item._id, sort_order: item.sort_order })) }));
 }
 async function getIncidentById(incidentId) {
-  const row = await IncidentReport.findOne({ public_id: Number(incidentId) }).lean();
+  const row = await IncidentReport.findById(incidentId).lean();
   if (!row) return null;
-  const images = await IncidentEvidence.find({ incident_report_id: Number(incidentId) }).sort({ sort_order: 1, public_id: 1 }).select({ public_id: 1, sort_order: 1 }).lean();
-  return { ...row, id: row.public_id, images: images.map((item) => ({ id: item.public_id, sort_order: item.sort_order })) };
+  return { ...row, id: row._id, images: row.evidence.map((item) => ({ id: item._id, sort_order: item.sort_order })) };
 }
 async function getIncidentImage({ incidentId, imageId, firebaseUid }) {
-  const report = await IncidentReport.findOne({ public_id: Number(incidentId) }).lean();
+  const report = await IncidentReport.findById(incidentId).lean();
   if (!report) return null;
-  if (firebaseUid && !(await UserProfile.exists({ public_id: report.user_id, firebase_uid: firebaseUid.trim() }))) return null;
-  return IncidentEvidence.findOne({ public_id: Number(imageId), incident_report_id: Number(incidentId) }).select({ image_data: 1, content_type: 1 }).lean();
+  if (firebaseUid && !(await UserProfile.exists({ _id: report.user_id, firebase_uid: firebaseUid.trim() }))) return null;
+  return report.evidence.find((item) => idString(item._id) === idString(imageId)) ?? null;
 }
 function detectImageContentType(buffer) {
   if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
@@ -317,7 +309,7 @@ router.get("/admin/incidents", requireAdminAuth, async (req, res) => {
 
 router.get("/admin/incidents/:id", requireAdminAuth, async (req, res) => {
   try {
-    const incidentId = parsePositiveInt(req.params?.id);
+    const incidentId = parseObjectId(req.params?.id);
     if (!incidentId) {
       return res.status(400).json({ message: "Invalid incident id" });
     }
@@ -339,7 +331,7 @@ router.patch(
   requireAdminAuth,
   async (req, res) => {
     try {
-      const incidentId = parsePositiveInt(req.params?.id);
+      const incidentId = parseObjectId(req.params?.id);
       if (!incidentId) {
         return res.status(400).json({ message: "Invalid incident id" });
       }
@@ -430,7 +422,7 @@ router.patch(
       }
 
       {
-        const current = await IncidentReport.findOne({ public_id: incidentId }).lean();
+        const current = await IncidentReport.findById(incidentId).lean();
         if (!current) return res.status(404).json({ message: "Incident not found" });
         const effectiveStatus = nextStatus ?? current.status;
         if (!canTransitionStatus(current.status, effectiveStatus)) return res.status(409).json({ message: "Invalid status transition" });
@@ -443,7 +435,7 @@ router.patch(
         if (resolutionNotes !== undefined) set.resolution_notes = resolutionNotes;
         if (effectiveStatus === "dispatched" && !current.dispatched_at) set.dispatched_at = new Date();
         if (effectiveStatus === "resolved" && !current.resolved_at) set.resolved_at = new Date();
-        await IncidentReport.updateOne({ public_id: incidentId }, { $set: set });
+        await IncidentReport.updateOne({ _id: incidentId }, { $set: set });
         const updated = await getIncidentById(incidentId);
         if (shouldNotifySender) notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "incident", entity_id: incidentId, status: effectiveStatus, assigned_department: updated?.assigned_department ?? current.assigned_department ?? null, trace });
         return res.json(toIncidentDto(updated, { isAdminRoute: true }));
@@ -461,8 +453,8 @@ router.get(
   requireAdminAuth,
   async (req, res) => {
     try {
-      const incidentId = parsePositiveInt(req.params?.incidentId);
-      const imageId = parsePositiveInt(req.params?.imageId);
+      const incidentId = parseObjectId(req.params?.incidentId);
+      const imageId = parseObjectId(req.params?.imageId);
       if (!incidentId || !imageId) {
         return res.status(400).json({ message: "Invalid incident/image id" });
       }
@@ -483,8 +475,8 @@ router.get(
 
 router.get("/incidents/:incidentId/images/:imageId", requireAppAuth, async (req, res) => {
   try {
-    const incidentId = parsePositiveInt(req.params?.incidentId);
-    const imageId = parsePositiveInt(req.params?.imageId);
+    const incidentId = parseObjectId(req.params?.incidentId);
+    const imageId = parseObjectId(req.params?.imageId);
     if (!incidentId || !imageId) {
       return res.status(400).json({ message: "Invalid incident/image id" });
     }
@@ -553,23 +545,23 @@ router.post("/incidents", requireAppAuth, async (req, res) => {
     try {
       const profile = await findProfileByUid(uid);
       if (!profile) return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
-      const incidentId = await Counter.nextPublicId("incident_reports");
       const now = new Date();
-      const evidenceDocs = [];
-      for (let i = 0; i < parsedImages.length; i++) {
-        const { imageData, contentType } = parsedImages[i];
-        evidenceDocs.push({ public_id: await Counter.nextPublicId("incident_evidence"), incident_report_id: incidentId, image_data: imageData, content_type: contentType, sort_order: i, created_at: now });
-      }
-      const session = await mongoose.startSession();
-      let incident;
-      try {
-        await session.withTransaction(async () => {
-          [incident] = await IncidentReport.create([{ public_id: incidentId, user_id: Number(profile.public_id), incident_type: incident_type.trim(), description: description.trim(), latitude: latitude ?? undefined, longitude: longitude ?? undefined, address: address ?? undefined, status: "pending", priority: "medium", created_at: now, updated_at: now }], { session });
-          if (evidenceDocs.length) await IncidentEvidence.create(evidenceDocs, { session });
-        });
-      } finally { await session.endSession(); }
+      const incident = await IncidentReport.create({
+        user_id: profile._id,
+        incident_type: incident_type.trim(),
+        description: description.trim(),
+        latitude: latitude ?? undefined,
+        longitude: longitude ?? undefined,
+        address: address ?? undefined,
+        status: "pending",
+        priority: "medium",
+        created_at: now,
+        updated_at: now,
+        evidence: parsedImages.map(({ imageData, contentType }, sort_order) => ({ image_data: imageData, content_type: contentType, sort_order, created_at: now })),
+      });
+      const incidentId = incident._id;
       await notifyAdminsAboutIncident({ incidentId, incidentType: incident.incident_type }).catch(() => {});
-      return res.status(201).json({ id: incident.public_id, user_id: incident.user_id, incident_type: incident.incident_type, description: incident.description, latitude: incident.latitude ?? null, longitude: incident.longitude ?? null, address: incident.address ?? null, status: incident.status, created_at: incident.created_at, images_count: parsedImages.length });
+      return res.status(201).json({ id: idString(incident._id), user_id: idString(incident.user_id), incident_type: incident.incident_type, description: incident.description, latitude: incident.latitude ?? null, longitude: incident.longitude ?? null, address: incident.address ?? null, status: incident.status, created_at: incident.created_at, images_count: parsedImages.length });
     } catch (err) {
       console.error("Create Mongo incident failed:", err?.message || err);
       return res.status(500).json({ message: "Failed to create incident report" });

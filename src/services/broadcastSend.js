@@ -1,98 +1,49 @@
 import { mongoose } from "../mongo.js";
-import { Broadcast, hasValidBroadcastAudience } from "../models/Broadcast.js";
-import { BroadcastDelivery } from "../models/BroadcastDelivery.js";
-import { UserProfile, Role } from "../models/Remaining.js";
+import { ReducedBroadcast as Broadcast, ReducedUserProfile as UserProfile, Notification } from "../models/Reduced.js";
 
-function toPositiveIntegerOrNull(value) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return null;
-  }
-  return parsed;
-}
-
-function dedupeUserIds(values) {
-  const seen = new Set();
-  for (const value of values ?? []) {
-    const id = toPositiveIntegerOrNull(value);
-    if (id != null) {
-      seen.add(id);
-    }
-  }
-  return [...seen];
+function dedupeIds(values) {
+  return [...new Map(values.map((value) => [value.toString(), value])).values()];
 }
 
 async function resolveAudienceRecipientIds(broadcast) {
-  if (broadcast.audience_type === "all") {
-    const users = await UserProfile.find({ status: { $ne: "deactivated" } }).select({ public_id: 1 }).lean();
-    return dedupeUserIds(users.map((user) => user.public_id));
-  }
-
-  if (broadcast.audience_type === "role") {
-    const roles = Array.isArray(broadcast.audience_roles)
-      ? broadcast.audience_roles
-          .filter((role) => typeof role === "string" && role.trim())
-          .map((role) => role.trim().toLowerCase())
-      : [];
-    if (roles.length > 0) {
-      const users = await UserProfile.find({ role: { $in: roles }, status: { $ne: "deactivated" } }).select({ public_id: 1 }).lean();
-      return dedupeUserIds(users.map((user) => user.public_id));
-    }
-
-    const roleIds = Array.isArray(broadcast.audience_role_ids)
-      ? [...new Set(broadcast.audience_role_ids.map((id) => toPositiveIntegerOrNull(id)).filter(Boolean))]
-      : [];
-    if (roleIds.length > 0) {
-      const roleRows = await Role.find({ public_id: { $in: roleIds } }).select({ name: 1 }).lean();
-      const roleNames = roleRows.map((role) => String(role.name).toLowerCase());
-      const users = await UserProfile.find({ role: { $in: roleNames }, status: { $ne: "deactivated" } }).select({ public_id: 1 }).lean();
-      return dedupeUserIds(users.map((row) => row.public_id));
-    }
-  }
-
-  return [];
+  const filter = { status: { $ne: "deactivated" } };
+  if (broadcast.audience_type === "role") filter.role = { $in: broadcast.audience_roles ?? [] };
+  const users = await UserProfile.find(filter).select({ _id: 1 }).lean();
+  return dedupeIds(users.map((user) => user._id));
 }
 
-export async function sendBroadcastByPublicId(broadcastId) {
+export async function sendBroadcastById(broadcastId) {
   const session = await mongoose.startSession();
-
   try {
     return await session.withTransaction(async () => {
       const now = new Date();
       const updated = await Broadcast.findOneAndUpdate(
-        { public_id: broadcastId, sent_at: null },
+        { _id: broadcastId, sent_at: null },
         { $set: { sent_at: now, updated_at: now } },
         { new: true, session }
       ).lean();
-
       if (!updated) {
-        const existing = await Broadcast.findOne({ public_id: broadcastId }, null, { session }).lean();
+        const existing = await Broadcast.findById(broadcastId, null, { session }).lean();
         return existing ? { status: "already_sent" } : { status: "not_found" };
       }
 
-      if (!hasValidBroadcastAudience(updated)) {
-        throw new Error("Invalid stored broadcast audience");
-      }
       const recipientIds = await resolveAudienceRecipientIds(updated);
-
-      let deliveredCount = 0;
-      if (recipientIds.length > 0) {
-        const docs = recipientIds.map((recipientUserId) => ({
-          broadcast_id: updated._id,
-          broadcast_public_id: updated.public_id,
-          recipient_user_id: recipientUserId,
-          delivered_at: now,
-          acknowledged_at: null,
-        }));
-        const inserted = await BroadcastDelivery.insertMany(docs, { ordered: false, session });
-        deliveredCount = Array.isArray(inserted) ? inserted.length : 0;
-      }
-
-      return { status: "sent", broadcast: updated, deliveredCount };
+      if (recipientIds.length) await Notification.insertMany(recipientIds.map((recipientId) => ({
+        record_type: "broadcast_delivery",
+        recipient_type: "user",
+        recipient_id: recipientId,
+        type: "broadcast",
+        title: updated.title,
+        message: updated.body,
+        source: { type: "broadcast", id: updated._id },
+        is_read: false,
+        delivered_at: now,
+        acknowledged_at: null,
+        created_at: now,
+      })), { ordered: false, session });
+      return { status: "sent", broadcast: updated, deliveredCount: recipientIds.length };
     });
   } finally {
-    try {
-      await session.endSession();
-    } catch {}
+    await session.endSession();
   }
 }

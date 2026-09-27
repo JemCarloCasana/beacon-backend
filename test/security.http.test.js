@@ -6,9 +6,7 @@ process.env.WRITE_RATE_LIMIT_WINDOW_MS = "60000";
 process.env.WRITE_RATE_LIMIT_MAX = "3";
 
 const { app } = await import("../server.js");
-const { Broadcast } = await import("../src/models/Broadcast.js");
-const { BroadcastDelivery } = await import("../src/models/BroadcastDelivery.js");
-const { AdminAccount } = await import("../src/models/Remaining.js");
+const { AdminRecord, Notification, ReducedBroadcast: Broadcast } = await import("../src/models/Reduced.js");
 const { auditLog, redactAuditValue } = await import("../src/utils/auditLog.js");
 
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
@@ -29,23 +27,23 @@ test.after(async () => {
 });
 
 function stubMongoAdmin(adminId, permissions, role) {
-  const originalFindOne = AdminAccount.findOne;
-  AdminAccount.findOne = () => ({ select: (projection) => ({ lean: async () =>
-    projection?.permission_names ? { permission_names: permissions } : projection?.role ? { role } : { public_id: adminId, status: "active" },
+  const originalFindOne = AdminRecord.findOne;
+  AdminRecord.findOne = () => ({ select: (projection) => ({ lean: async () =>
+    projection?.permissions ? { permissions } : projection?.role ? { role } : { _id: adminId, status: "active" },
   }) });
   return () => {
-    AdminAccount.findOne = originalFindOne;
+    AdminRecord.findOne = originalFindOne;
   };
 }
 
 function stubAdminLookup(t, replacement) {
-  const originalFindOne = AdminAccount.findOne;
-  AdminAccount.findOne = replacement;
-  t.after(() => { AdminAccount.findOne = originalFindOne; });
+  const originalFindOne = AdminRecord.findOne;
+  AdminRecord.findOne = replacement;
+  t.after(() => { AdminRecord.findOne = originalFindOne; });
 }
 
 function adminToken(adminId, role = "admin", expiresIn = "7d") {
-  return jwt.sign({ sub: String(adminId), adminId, role, roleId: 1 }, JWT_SECRET, { expiresIn });
+  return jwt.sign({ sub: String(adminId), adminId: String(adminId), role }, JWT_SECRET, { expiresIn });
 }
 
 test("helmet sets security headers", async () => {
@@ -77,7 +75,7 @@ test("protected routes return 401 without a token", async (t) => {
 
 test("expired admin token returns 401", async () => {
   const expired = jwt.sign(
-    { sub: "99", adminId: 99, role: "admin", roleId: 1, exp: Math.floor(Date.now() / 1000) - 60 },
+    { sub: "999999999999999999999999", adminId: "999999999999999999999999", role: "admin", exp: Math.floor(Date.now() / 1000) - 60 },
     JWT_SECRET
   );
   const res = await fetch(`${baseUrl}/admin/me`, {
@@ -87,15 +85,16 @@ test("expired admin token returns 401", async () => {
 });
 
 test("personnel without manage_broadcasts gets 403 on draft delete", async () => {
-  const restoreMongo = stubMongoAdmin(21, ["view_broadcasts"], "personnel");
+  const personnelId = "111111111111111111111111";
+  const restoreMongo = stubMongoAdmin(personnelId, ["view_broadcasts"], "personnel");
   const originalFindOneAndDelete = Broadcast.findOneAndDelete;
   Broadcast.findOneAndDelete = () => {
     throw new Error("handler must not run for forbidden personnel");
   };
   try {
-    const res = await fetch(`${baseUrl}/admin/broadcasts/5`, {
+    const res = await fetch(`${baseUrl}/admin/broadcasts/555555555555555555555555`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${adminToken(21, "personnel")}` },
+      headers: { Authorization: `Bearer ${adminToken(personnelId, "personnel")}` },
     });
     assert.equal(res.status, 403);
     assert.deepEqual(await res.json(), { message: "Insufficient permissions" });
@@ -106,17 +105,18 @@ test("personnel without manage_broadcasts gets 403 on draft delete", async () =>
 });
 
 test("admin with manage_broadcasts passes the permission gate", async () => {
-  const restoreMongo = stubMongoAdmin(9, ["manage_broadcasts", "view_broadcasts"], "admin");
+  const administratorId = "222222222222222222222222";
+  const restoreMongo = stubMongoAdmin(administratorId, ["manage_broadcasts", "view_broadcasts"], "admin");
   const originalFindOneAndDelete = Broadcast.findOneAndDelete;
   const originalFindOne = Broadcast.findOne;
-  const originalDeleteMany = BroadcastDelivery.deleteMany;
+  const originalDeleteMany = Notification.deleteMany;
   Broadcast.findOneAndDelete = () => ({ lean: async () => null });
   Broadcast.findOne = () => ({ lean: async () => null });
-  BroadcastDelivery.deleteMany = async () => ({ deletedCount: 0 });
+  Notification.deleteMany = async () => ({ deletedCount: 0 });
   try {
-    const res = await fetch(`${baseUrl}/admin/broadcasts/999`, {
+    const res = await fetch(`${baseUrl}/admin/broadcasts/999999999999999999999999`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${adminToken(9, "admin")}` },
+      headers: { Authorization: `Bearer ${adminToken(administratorId, "admin")}` },
     });
     assert.equal(res.status, 404);
     assert.deepEqual(await res.json(), { message: "Broadcast not found" });
@@ -124,7 +124,7 @@ test("admin with manage_broadcasts passes the permission gate", async () => {
     restoreMongo();
     Broadcast.findOneAndDelete = originalFindOneAndDelete;
     Broadcast.findOne = originalFindOne;
-    BroadcastDelivery.deleteMany = originalDeleteMany;
+    Notification.deleteMany = originalDeleteMany;
   }
 });
 

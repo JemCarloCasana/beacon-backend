@@ -20,7 +20,7 @@ test("GET /admin/incidents rejects invalid status filters", async () => {
   assert.deepEqual(res.body, { message: "Invalid status filter" });
 });
 
-test("GET /admin/incidents/:id validates numeric IDs", async () => {
+test("GET /admin/incidents/:id validates ObjectId strings", async () => {
   const res = response();
   await handler("/admin/incidents/:id", "get")({ params: { id: "abc" } }, res);
   assert.equal(res.statusCode, 400);
@@ -29,19 +29,19 @@ test("GET /admin/incidents/:id validates numeric IDs", async () => {
 
 test("PATCH /admin/incidents/:id rejects legacy SQL-era assignment fields", async () => {
   const res = response();
-  await handler("/admin/incidents/:id", "patch")({ params: { id: "31" }, body: { assigned_admin_id: 4 } }, res);
+  await handler("/admin/incidents/:id", "patch")({ params: { id: "640000000000000000000031" }, body: { assigned_admin_id: 4 } }, res);
   assert.equal(res.statusCode, 400);
   assert.match(res.body.message, /assigned_admin_id is no longer supported/i);
 });
 
 test("PATCH /admin/incidents/:id validates department and transition input before saving", async () => {
   const badDepartment = response();
-  await handler("/admin/incidents/:id", "patch")({ params: { id: "31" }, body: { assigned_department: "Unknown" } }, badDepartment);
+  await handler("/admin/incidents/:id", "patch")({ params: { id: "640000000000000000000031" }, body: { assigned_department: "Unknown" } }, badDepartment);
   assert.equal(badDepartment.statusCode, 400);
   assert.deepEqual(badDepartment.body, { message: "Invalid assigned_department" });
 
   const badStatus = response();
-  await handler("/admin/incidents/:id", "patch")({ params: { id: "31" }, body: { status: "closed" } }, badStatus);
+  await handler("/admin/incidents/:id", "patch")({ params: { id: "640000000000000000000031" }, body: { status: "closed" } }, badStatus);
   assert.equal(badStatus.statusCode, 400);
   assert.deepEqual(badStatus.body, { message: "Invalid status" });
 });

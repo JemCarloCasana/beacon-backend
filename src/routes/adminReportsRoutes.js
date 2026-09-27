@@ -1,9 +1,8 @@
 import express from "express";
 import { requireAdminAuth, requirePermission } from "../middleware/adminAuth.js";
-import { ReportRun } from "../models/ReportRun.js";
-import { Counter } from "../models/Counter.js";
+import { ReducedReportRun as ReportRun, ReducedIncidentReport as IncidentReport, SosRecord } from "../models/Reduced.js";
 import { auditLog } from "../utils/auditLog.js";
-import { IncidentReport, SosThread, SosEvent } from "../models/Remaining.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 const router = express.Router();
 
@@ -192,10 +191,10 @@ async function buildAnalytics({ range, timezone, now = new Date() }) {
   const windowStart = getWindowStart(range, now);
   const granularity = getGranularity(range);
   const incidents = await IncidentReport.find({ created_at: { $gte: windowStart, $lte: now } }).lean();
-  const threads = await SosThread.find({ created_at: { $gte: windowStart, $lte: now } }).lean();
-  const events = await SosEvent.find({ sos_id: { $in: threads.map((t) => t.root_event_id) } }).sort({ created_at: 1, public_id: 1 }).lean();
+  const threads = await SosRecord.find({ record_type: "case", created_at: { $gte: windowStart, $lte: now } }).lean();
+  const events = await SosRecord.find({ record_type: "event", sos_id: { $in: threads.map((t) => t.root_event_id) } }).sort({ created_at: 1, _id: 1 }).lean();
   const eventBySos = new Map();
-  for (const event of events) eventBySos.set(Number(event.sos_id), event);
+  for (const event of events) eventBySos.set(event.sos_id.toString(), event);
   const statusCounts = new Map(); const priorityCounts = new Map(); const categoryCounts = new Map(); const sosCategoryCounts = new Map();
   const incidentTrend = new Map(); const sosTrend = new Map(); const responseTrend = new Map();
   let responseTotal = 0; let responseCount = 0; let resolutionTotal = 0; let resolutionCount = 0;
@@ -215,7 +214,7 @@ async function buildAnalytics({ range, timezone, now = new Date() }) {
     if (resolution > 0) { value.avg_resolution_seconds += resolution / 1000; value.resolution_count++; }
     responseTrend.set(bucket, value);
   }
-  for (const thread of threads) { const event = eventBySos.get(Number(thread.root_event_id)); const date = event?.created_at || thread.created_at; addTrend(sosTrend, date, 1); sosCategoryCounts.set(thread.emergency_category, (sosCategoryCounts.get(thread.emergency_category) || 0) + 1); }
+  for (const thread of threads) { const event = eventBySos.get(thread.root_event_id.toString()); const date = event?.created_at || thread.created_at; addTrend(sosTrend, date, 1); sosCategoryCounts.set(thread.emergency_category, (sosCategoryCounts.get(thread.emergency_category) || 0) + 1); }
   const bucketKeys = generateBucketKeys({ start: windowStart, end: now, granularity });
   const ordered = (map) => [...map.entries()].map(([label, value]) => ({ label, value }));
   const statusOrder = ["pending", "dispatched", "in_progress", "resolved"];
@@ -225,11 +224,11 @@ async function buildAnalytics({ range, timezone, now = new Date() }) {
 
 async function getCsvDetails({ range, now = new Date() }) {
   const windowStart = getWindowStart(range, now);
-  const incidents = await IncidentReport.find({ created_at: { $gte: windowStart, $lte: now } }).sort({ created_at: -1, public_id: -1 }).lean();
-  const threads = await SosThread.find({ created_at: { $gte: windowStart, $lte: now } }).sort({ created_at: -1, root_event_id: -1 }).lean();
-  const roots = await SosEvent.find({ public_id: { $in: threads.map((thread) => thread.root_event_id) } }).lean();
-  const rootById = new Map(roots.map((event) => [Number(event.public_id), event]));
-  return { incidents: incidents.map((row) => ({ id: row.public_id, incident_type: row.incident_type ?? "", status: row.status ?? "", priority: row.priority ?? "", assigned_department: row.assigned_department ?? "", address: row.address ?? "", created_at: toIso(row.created_at) ?? "", dispatched_at: toIso(row.dispatched_at) ?? "", resolved_at: toIso(row.resolved_at) ?? "" })), sos: threads.map((row) => { const root = rootById.get(Number(row.root_event_id)); return { sos_id: row.root_event_id, latest_status: row.latest_status ?? "", emergency_category: formatSosCategoryLabel(row.emergency_category), assigned_unit: row.assigned_unit ?? "", terminal_status: row.terminal_status ?? "", address: root?.address ?? "", opened_at: toIso(root?.created_at ?? row.created_at) ?? "", resolved_at: toIso(row.resolved_at) ?? "" }; }) };
+  const incidents = await IncidentReport.find({ created_at: { $gte: windowStart, $lte: now } }).sort({ created_at: -1, _id: -1 }).lean();
+  const threads = await SosRecord.find({ record_type: "case", created_at: { $gte: windowStart, $lte: now } }).sort({ created_at: -1, _id: -1 }).lean();
+  const roots = await SosRecord.find({ _id: { $in: threads.map((thread) => thread.root_event_id) }, record_type: "event" }).lean();
+  const rootById = new Map(roots.map((event) => [event._id.toString(), event]));
+  return { incidents: incidents.map((row) => ({ id: row._id.toString(), incident_type: row.incident_type ?? "", status: row.status ?? "", priority: row.priority ?? "", assigned_department: row.assigned_department ?? "", address: row.address ?? "", created_at: toIso(row.created_at) ?? "", dispatched_at: toIso(row.dispatched_at) ?? "", resolved_at: toIso(row.resolved_at) ?? "" })), sos: threads.map((row) => { const root = rootById.get(row.root_event_id.toString()); return { sos_id: row.root_event_id.toString(), latest_status: row.latest_status ?? "", emergency_category: formatSosCategoryLabel(row.emergency_category), assigned_unit: row.assigned_unit ?? "", terminal_status: row.terminal_status ?? "", address: root?.address ?? "", opened_at: toIso(root?.created_at ?? row.created_at) ?? "", resolved_at: toIso(row.resolved_at) ?? "" }; }) };
 
 }
 
@@ -386,23 +385,22 @@ router.post("/admin/reports/generate", requireAdminAuth, requirePermission("mana
     const generatedAt = new Date();
     const analytics = await buildAnalytics({ range, timezone, now: generatedAt });
 
-    const adminId = Number(req.admin?.adminId);
+    const adminId = parseObjectId(req.admin?.adminId);
     const createdRun = await ReportRun.create({
-      public_id: await Counter.nextPublicId("admin_report_runs"),
       report_key: reportKey,
       range_key: range,
       timezone,
-      generated_by_admin_id: Number.isInteger(adminId) && adminId > 0 ? adminId : null,
+      generated_by_admin_id: adminId,
       generated_at: generatedAt,
       payload_hash: null,
     });
 
     auditLog({
       action: "report.generated",
-      actor: Number.isInteger(adminId) ? adminId : null,
+      actor: adminId?.toString() ?? null,
       target: `${reportKey}|${range}|${timezone}`,
       outcome: "generated",
-      details: { publicId: createdRun?.public_id ?? null },
+      details: { id: createdRun?._id.toString() ?? null },
     });
 
     const cards = await getCardsMetadata(timezone);

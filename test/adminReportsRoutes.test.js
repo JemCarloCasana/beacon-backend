@@ -1,10 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import mongoose from "mongoose";
 
 import router from "../src/routes/adminReportsRoutes.js";
-import { Counter } from "../src/models/Counter.js";
-import { ReportRun } from "../src/models/ReportRun.js";
-import { IncidentReport, SosThread, SosEvent } from "../src/models/Remaining.js";
+import { ReducedReportRun as ReportRun, ReducedIncidentReport as IncidentReport, SosRecord } from "../src/models/Reduced.js";
 
 function handler(path, method) {
   const layer = router.stack.find((entry) => entry.route?.path === path && entry.route.methods?.[method]);
@@ -24,8 +23,7 @@ function stub(t, model, method, replacement) {
 
 function stubEmptyAnalytics(t) {
   stub(t, IncidentReport, "find", () => ({ lean: async () => [] }));
-  stub(t, SosThread, "find", () => ({ lean: async () => [] }));
-  stub(t, SosEvent, "find", () => ({ sort: () => ({ lean: async () => [] }) }));
+  stub(t, SosRecord, "find", () => ({ sort() { return this; }, lean: async () => [] }));
   stub(t, ReportRun, "find", () => ({ sort: () => ({ lean: async () => [] }) }));
 }
 
@@ -52,16 +50,16 @@ test("GET /admin/reports/overview reads Mongo models and returns stable cards an
   assert.deepEqual(res.body.kpis, { total_incidents: 0, active_incidents: 0, resolved_incidents: 0, active_sos: 0, avg_response_seconds: 0, avg_resolution_seconds: 0 });
 });
 
-test("POST /admin/reports/generate persists a Mongo report run with numeric public ID", async (t) => {
+test("POST /admin/reports/generate persists a report run with an ObjectId admin reference", async (t) => {
   stubEmptyAnalytics(t);
   let created;
-  stub(t, Counter, "nextPublicId", async (name) => { assert.equal(name, "admin_report_runs"); return 91; });
-  stub(t, ReportRun, "create", async (doc) => { created = doc; return doc; });
+  stub(t, ReportRun, "create", async (doc) => { created = doc; return { ...doc, _id: new mongoose.Types.ObjectId() }; });
+  const adminId = new mongoose.Types.ObjectId();
   const res = response();
-  await handler("/admin/reports/generate", "post")({ body: { report_key: "weekly_safety_report" }, admin: { adminId: 4 } }, res);
+  await handler("/admin/reports/generate", "post")({ body: { report_key: "weekly_safety_report" }, admin: { adminId: adminId.toString() } }, res);
   assert.equal(res.statusCode, 200);
-  assert.equal(created.public_id, 91);
+  assert.equal(created.public_id, undefined);
   assert.equal(created.range_key, "7d");
-  assert.equal(created.generated_by_admin_id, 4);
+  assert.equal(created.generated_by_admin_id.toString(), adminId.toString());
   assert.equal(res.body.range, "7d");
 });

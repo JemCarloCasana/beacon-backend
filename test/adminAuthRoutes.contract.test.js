@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 
 if (!process.env.ADMIN_JWT_SECRET) {
   process.env.ADMIN_JWT_SECRET = "test-admin-secret";
@@ -9,7 +10,7 @@ if (!process.env.ADMIN_JWT_SECRET) {
 
 const { default: adminAuthRouter } = await import("../src/routes/adminAuthRoutes.js");
 const { default: adminMeRouter } = await import("../src/routes/adminMeRoutes.js");
-const { AdminAccount, Role } = await import("../src/models/Remaining.js");
+const { AdminRecord } = await import("../src/models/Reduced.js");
 
 function queryResult(value) {
   return { select() { return this; }, lean: async () => value };
@@ -119,15 +120,10 @@ test("signup rejects password with fewer than 3 classes", async () => {
 });
 
 test("signup rejects duplicate email with 409", async (t) => {
-  const originalRoleFindOne = Role.findOne;
-  const originalAdminFindOne = AdminAccount.findOne;
-  t.after(() => {
-    Role.findOne = originalRoleFindOne;
-    AdminAccount.findOne = originalAdminFindOne;
-  });
+  const originalAdminFindOne = AdminRecord.findOne;
+  t.after(() => { AdminRecord.findOne = originalAdminFindOne; });
 
-  Role.findOne = () => queryResult({ public_id: 2 });
-  AdminAccount.findOne = () => queryResult({ public_id: 9 });
+  AdminRecord.findOne = () => queryResult({ _id: new mongoose.Types.ObjectId() });
 
   const req = {
     body: {
@@ -158,12 +154,12 @@ test("login rejects missing fields", async () => {
 });
 
 test("login rejects bad credentials", async (t) => {
-  const originalFindOne = AdminAccount.findOne;
+  const originalFindOne = AdminRecord.findOne;
   t.after(() => {
-    AdminAccount.findOne = originalFindOne;
+    AdminRecord.findOne = originalFindOne;
   });
 
-  AdminAccount.findOne = () => queryResult(null);
+  AdminRecord.findOne = () => queryResult(null);
 
   const req = {
     body: {
@@ -180,13 +176,14 @@ test("login rejects bad credentials", async (t) => {
 });
 
 test("login accepts valid credentials and returns token", async (t) => {
-  const originalFindOne = AdminAccount.findOne;
+  const originalFindOne = AdminRecord.findOne;
   t.after(() => {
-    AdminAccount.findOne = originalFindOne;
+    AdminRecord.findOne = originalFindOne;
   });
 
   const passwordHash = await bcrypt.hash("Abcdef123!", 12);
-  AdminAccount.findOne = () => queryResult({ public_id: 17, email: "valid@example.com", full_name: "Valid Admin", password_hash: passwordHash, role_id: 1, status: "active", role: "personnel", permission_names: ["manage_users"] });
+  const adminId = new mongoose.Types.ObjectId();
+  AdminRecord.findOne = () => queryResult({ _id: adminId, record_type: "account", email: "valid@example.com", full_name: "Valid Admin", password_hash: passwordHash, status: "active", role: "personnel", permissions: ["manage_users"] });
 
   const req = {
     body: {
@@ -200,18 +197,18 @@ test("login accepts valid credentials and returns token", async (t) => {
 
   assert.equal(res.statusCode, 200);
   assert.equal(typeof res.body.token, "string");
-  assert.equal(res.body.admin.id, 17);
+  assert.equal(res.body.admin.id, adminId.toString());
   assert.deepEqual(res.body.admin.permissions, ["manage_users"]);
 });
 
 test("login rejects deactivated account with 403", async (t) => {
-  const originalFindOne = AdminAccount.findOne;
+  const originalFindOne = AdminRecord.findOne;
   t.after(() => {
-    AdminAccount.findOne = originalFindOne;
+    AdminRecord.findOne = originalFindOne;
   });
 
   const passwordHash = await bcrypt.hash("Abcdef123!", 12);
-  AdminAccount.findOne = () => queryResult({ public_id: 18, email: "deactivated@example.com", full_name: "Deactivated User", password_hash: passwordHash, role_id: 2, status: "deactivated", role: "personnel" });
+  AdminRecord.findOne = () => queryResult({ _id: new mongoose.Types.ObjectId(), record_type: "account", email: "deactivated@example.com", full_name: "Deactivated User", password_hash: passwordHash, status: "deactivated", role: "personnel" });
 
   const req = {
     body: {
@@ -256,18 +253,19 @@ test("/admin/me returns 401 with invalid token", async () => {
 });
 
 test("/admin/me returns role and permissions for valid token", async (t) => {
-  const originalFindOne = AdminAccount.findOne;
+  const originalFindOne = AdminRecord.findOne;
   t.after(() => {
-    AdminAccount.findOne = originalFindOne;
+    AdminRecord.findOne = originalFindOne;
   });
 
+  const adminId = new mongoose.Types.ObjectId();
   const token = jwt.sign(
-    { sub: "5", role: "personnel", roleId: 2 },
+    { sub: adminId.toString(), role: "personnel" },
     process.env.ADMIN_JWT_SECRET,
     { expiresIn: "1h" }
   );
 
-  AdminAccount.findOne = () => queryResult({ public_id: 5, status: "active", email: "p@example.com", full_name: "P User", role_id: 2, role: "personnel", permission_names: ["manage_reports"] });
+  AdminRecord.findOne = () => queryResult({ _id: adminId, record_type: "account", status: "active", email: "p@example.com", full_name: "P User", role: "personnel", permissions: ["manage_reports"] });
 
   const req = {
     headers: {
@@ -285,18 +283,19 @@ test("/admin/me returns role and permissions for valid token", async (t) => {
 });
 
 test("/admin/me middleware returns 403 for deactivated account", async (t) => {
-  const originalFindOne = AdminAccount.findOne;
+  const originalFindOne = AdminRecord.findOne;
   t.after(() => {
-    AdminAccount.findOne = originalFindOne;
+    AdminRecord.findOne = originalFindOne;
   });
 
+  const adminId = new mongoose.Types.ObjectId();
   const token = jwt.sign(
-    { sub: "6", role: "personnel", roleId: 2 },
+    { sub: adminId.toString(), role: "personnel" },
     process.env.ADMIN_JWT_SECRET,
     { expiresIn: "1h" }
   );
 
-  AdminAccount.findOne = () => queryResult({ public_id: 6, status: "deactivated" });
+  AdminRecord.findOne = () => queryResult({ _id: adminId, record_type: "account", status: "deactivated" });
 
   const req = {
     headers: {

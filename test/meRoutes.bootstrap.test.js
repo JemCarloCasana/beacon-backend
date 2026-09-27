@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 
 import router from "../src/routes/meRoutes.js";
 import { requireAppAuth } from "../src/middleware/requireAppAuth.js";
-import { Counter } from "../src/models/Counter.js";
-import { FriendRequest, Friendship, UserProfile } from "../src/models/Remaining.js";
+import mongoose from "mongoose";
+import { FriendConnection, ReducedUserProfile as UserProfile } from "../src/models/Reduced.js";
 
 function findRouteHandler(path, method) {
   const layer = router.stack.find(
@@ -46,7 +46,7 @@ function queryResult(value) {
 }
 
 function profile(values) {
-  return { ...values, save: async () => {} };
+  return { ...values, _id: values._id ?? new mongoose.Types.ObjectId(), save: async () => {} };
 }
 
 function replaceMethod(t, model, method, replacement) {
@@ -58,7 +58,6 @@ function replaceMethod(t, model, method, replacement) {
 test("POST /me/bootstrap accepts citizen and normalizes mixed-case role", async (t) => {
   let receivedRole = null;
   replaceMethod(t, UserProfile, "findOne", () => queryResult(null));
-  replaceMethod(t, Counter, "nextPublicId", async () => 77);
   replaceMethod(t, UserProfile, "create", async (values) => {
     receivedRole = values.role;
     return profile({ ...values, profile_image_url: null });
@@ -79,7 +78,6 @@ test("POST /me/bootstrap accepts citizen and normalizes mixed-case role", async 
 
 test("POST /me/bootstrap accepts student role", async (t) => {
   replaceMethod(t, UserProfile, "findOne", () => queryResult(null));
-  replaceMethod(t, Counter, "nextPublicId", async () => 78);
   replaceMethod(t, UserProfile, "create", async (values) => profile({ ...values, profile_image_url: null }));
 
   const req = {
@@ -121,7 +119,7 @@ test("POST /me/bootstrap rejects unknown role", async () => {
 });
 
 test("POST /me/bootstrap updates role to latest submitted value on re-bootstrap", async (t) => {
-  const existing = profile({ public_id: 79, firebase_uid: "uid-rebootstrap", email: "rebootstrap@example.com", full_name: "Rebootstrap User", phone_number: null, role: "citizen", status: "active", beacon_code: "BCN-ABC123" });
+  const existing = profile({ firebase_uid: "uid-rebootstrap", email: "rebootstrap@example.com", full_name: "Rebootstrap User", phone_number: null, role: "citizen", status: "active", beacon_code: "BCN-ABC123" });
   replaceMethod(t, UserProfile, "findOne", () => queryResult(existing));
 
   const firstRes = createRes();
@@ -149,7 +147,7 @@ test("POST /me/bootstrap updates role to latest submitted value on re-bootstrap"
 });
 
 test("GET /me and GET /users return normalized app role values", async (t) => {
-  replaceMethod(t, UserProfile, "findOne", ({ firebase_uid }) => queryResult(profile({ public_id: firebase_uid === "legacy-uid" ? 11 : 22, firebase_uid, email: firebase_uid === "legacy-uid" ? "legacy@example.com" : "new@example.com", full_name: firebase_uid === "legacy-uid" ? "Legacy User" : "New User", phone_number: null, role: firebase_uid === "legacy-uid" ? "citizen" : "student", profile_image_url: null })));
+  replaceMethod(t, UserProfile, "findOne", ({ firebase_uid }) => queryResult(profile({ firebase_uid, email: firebase_uid === "legacy-uid" ? "legacy@example.com" : "new@example.com", full_name: firebase_uid === "legacy-uid" ? "Legacy User" : "New User", phone_number: null, role: firebase_uid === "legacy-uid" ? "citizen" : "student", profile_image_url: null })));
 
   const meRes = createRes();
   await getMeHandler({ auth: { uid: "legacy-uid" } }, meRes);
@@ -204,18 +202,21 @@ test("GET /users/search returns 404 when the authenticated user has no profile r
 });
 
 test("GET /users/search performs case-insensitive multi-word discovery with stable ordering and friendship status", async (t) => {
-  replaceMethod(t, UserProfile, "findOne", ({ firebase_uid }) => queryResult(firebase_uid === "search-uid" ? profile({ public_id: 77 }) : null));
+  const me = new mongoose.Types.ObjectId();
+  const [john, johnny, alice, elton] = Array.from({ length: 4 }, () => new mongoose.Types.ObjectId());
+  replaceMethod(t, UserProfile, "findOne", ({ firebase_uid }) => queryResult(firebase_uid === "search-uid" ? profile({ _id: me }) : null));
   replaceMethod(t, UserProfile, "find", () => queryResult([
-    { public_id: 11, full_name: "John Smalls", beacon_code: "BCN-JS1111" },
-    { public_id: 12, full_name: "Johnny Smalls", beacon_code: "BCN-JS2222" },
-    { public_id: 13, full_name: "Alice Johnson Smith", beacon_code: "BCN-AJS33" },
-    { public_id: 14, full_name: "Elton John Smithe", beacon_code: "BCN-EJS44" },
+    { _id: john, full_name: "John Smalls", beacon_code: "BCN-JS1111" },
+    { _id: johnny, full_name: "Johnny Smalls", beacon_code: "BCN-JS2222" },
+    { _id: alice, full_name: "Alice Johnson Smith", beacon_code: "BCN-AJS33" },
+    { _id: elton, full_name: "Elton John Smithe", beacon_code: "BCN-EJS44" },
   ]));
-  replaceMethod(t, Friendship, "find", () => queryResult([{ user_id: 77, friend_user_id: 11 }]));
-  replaceMethod(t, FriendRequest, "find", () => queryResult([
-    { requester_user_id: 12, addressee_user_id: 77, status: "pending" },
-    { requester_user_id: 77, addressee_user_id: 13, status: "pending" },
-  ]));
+  replaceMethod(t, FriendConnection, "find", (filter) => queryResult(filter.record_type === "friendship"
+    ? [{ user_ids: [me, john] }]
+    : [
+      { requested_by: johnny, recipient: me },
+      { requested_by: me, recipient: alice },
+    ]));
 
   const req = {
     auth: { uid: "search-uid" },
@@ -228,25 +229,25 @@ test("GET /users/search performs case-insensitive multi-word discovery with stab
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body, [
     {
-      id: 13,
+      id: alice.toString(),
       full_name: "Alice Johnson Smith",
       beacon_code: "BCN-AJS33",
       friendship_status: "outgoing_pending",
     },
     {
-      id: 14,
+      id: elton.toString(),
       full_name: "Elton John Smithe",
       beacon_code: "BCN-EJS44",
       friendship_status: "none",
     },
     {
-      id: 11,
+      id: john.toString(),
       full_name: "John Smalls",
       beacon_code: "BCN-JS1111",
       friendship_status: "already_friends",
     },
     {
-      id: 12,
+      id: johnny.toString(),
       full_name: "Johnny Smalls",
       beacon_code: "BCN-JS2222",
       friendship_status: "incoming_pending",

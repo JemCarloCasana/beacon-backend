@@ -22,12 +22,12 @@ test("GET /admin/sos/live rejects unknown status filters", async () => {
 
 test("POST /admin/sos/:sosId/acknowledge validates note and assigned unit before Mongo access", async () => {
   const invalidNote = response();
-  await handler("/admin/sos/:sosId/acknowledge", "post")({ params: { sosId: "8" }, body: { note: 7, assigned_unit: "Police Personnel" }, admin: { adminId: 1 } }, invalidNote);
+  await handler("/admin/sos/:sosId/acknowledge", "post")({ params: { sosId: "111111111111111111111111" }, body: { note: 7, assigned_unit: "Police Personnel" }, admin: { adminId: "222222222222222222222222" } }, invalidNote);
   assert.equal(invalidNote.statusCode, 400);
   assert.deepEqual(invalidNote.body, { message: "note must be a string" });
 
   const missingUnit = response();
-  await handler("/admin/sos/:sosId/acknowledge", "post")({ params: { sosId: "8" }, body: {}, admin: { adminId: 1 } }, missingUnit);
+  await handler("/admin/sos/:sosId/acknowledge", "post")({ params: { sosId: "111111111111111111111111" }, body: {}, admin: { adminId: "222222222222222222222222" } }, missingUnit);
   assert.equal(missingUnit.statusCode, 400);
   assert.deepEqual(missingUnit.body, { message: "assigned_unit is required" });
 });

@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 
 import contactRouter from "../src/routes/contactRoutes.js";
 import deviceRouter from "../src/routes/deviceRoutes.js";
-import { Counter } from "../src/models/Counter.js";
-import { Device, EmergencyContact, UserProfile } from "../src/models/Remaining.js";
+import { ReducedUserProfile as UserProfile } from "../src/models/Reduced.js";
 
 function handler(router, path, method) {
   const layer = router.stack.find((entry) => entry.route?.path === path && entry.route.methods?.[method]);
@@ -22,61 +21,59 @@ function stub(t, model, method, replacement) {
   t.after(() => { model[method] = original; });
 }
 
-test("POST /contacts stores a normalized, user-owned Mongo contact", async (t) => {
-  let created;
-  stub(t, UserProfile, "findOne", async () => ({ public_id: 20 }));
-  stub(t, EmergencyContact, "countDocuments", async () => 0);
-  stub(t, Counter, "nextPublicId", async (name) => { assert.equal(name, "emergency_contacts"); return 31; });
-  stub(t, EmergencyContact, "create", async (doc) => { created = doc; return { ...doc, created_at: "2026-01-01T00:00:00.000Z" }; });
+function profile() {
+  const value = new UserProfile({ firebase_uid: "uid-20", full_name: "User", email: "user@example.com" });
+  value.save = async () => {};
+  return value;
+}
+
+test("POST /contacts embeds a normalized contact under the authenticated profile", async (t) => {
+  const user = profile();
+  stub(t, UserProfile, "findOne", async () => user);
   const res = response();
   await handler(contactRouter, "/contacts", "post")({ auth: { uid: "uid-20" }, body: { contact_name: "  Alex  ", phone_number: "09123456789", relation: " friend ", is_primary: true } }, res);
   assert.equal(res.statusCode, 201);
-  assert.deepEqual({ id: res.body.id, contact_name: created.contact_name, phone_number: created.phone_number, relation: created.relation, owner: created.owner_user_id, is_primary: created.is_primary }, {
-    id: 31, contact_name: "Alex", phone_number: "+639123456789", relation: "friend", owner: 20, is_primary: true,
-  });
+  assert.match(res.body.id, /^[a-f\d]{24}$/i);
+  assert.equal(user.emergency_contacts[0].contact_name, "Alex");
+  assert.equal(user.emergency_contacts[0].phone_number, "+639123456789");
+  assert.equal(user.emergency_contacts[0].relation, "friend");
+  assert.equal(user.emergency_contacts[0].is_primary, true);
 });
 
-test("GET /contacts returns numeric-ID DTOs for the authenticated profile", async (t) => {
-  stub(t, UserProfile, "findOne", async () => ({ public_id: 20 }));
-  stub(t, EmergencyContact, "find", (filter) => {
-    assert.deepEqual(filter, { owner_user_id: 20 });
-    return { sort: () => ({ lean: async () => [{ public_id: 31, contact_name: "Alex", phone_number: "+639123456789", is_primary: true, created_at: "now" }] }) };
-  });
+test("GET /contacts returns ObjectId string DTOs for the authenticated profile", async (t) => {
+  const user = profile();
+  user.emergency_contacts.push({ contact_name: "Alex", phone_number: "+639123456789", is_primary: true, created_at: new Date("2026-01-01") });
+  stub(t, UserProfile, "findOne", async () => user);
   const res = response();
   await handler(contactRouter, "/contacts", "get")({ auth: { uid: "uid-20" } }, res);
-  assert.deepEqual(res.body, [{ id: 31, contact_name: "Alex", phone_number: "+639123456789", relation: null, is_primary: true, created_at: "now" }]);
+  assert.equal(res.body.length, 1);
+  assert.equal(res.body[0].id, user.emergency_contacts[0]._id.toString());
+  assert.equal(res.body[0].contact_name, "Alex");
 });
 
-test("PATCH /contacts/:id updates only a contact owned by the authenticated profile", async (t) => {
-  let filter;
-  stub(t, UserProfile, "findOne", async () => ({ public_id: 20 }));
-  stub(t, EmergencyContact, "findOneAndUpdate", (value, update, options) => {
-    filter = value;
-    assert.equal(update.$set.contact_name, "Alex Updated");
-    assert.equal(update.$set.phone_number, "+639123456789");
-    assert.equal(options.runValidators, true);
-    return { lean: async () => ({ public_id: 31, contact_name: "Alex Updated", phone_number: "+639123456789", is_primary: false }) };
-  });
+test("PATCH /contacts/:id updates only a contact embedded in the authenticated profile", async (t) => {
+  const user = profile();
+  user.emergency_contacts.push({ contact_name: "Alex", phone_number: "+639123456789", is_primary: false });
+  stub(t, UserProfile, "findOne", async () => user);
   const res = response();
-  await handler(contactRouter, "/contacts/:id", "patch")({ auth: { uid: "uid-20" }, params: { id: "31" }, body: { contact_name: "Alex Updated", phone_number: "09123456789" } }, res);
-  assert.deepEqual(filter, { public_id: 31, owner_user_id: 20 });
-  assert.equal(res.body.id, 31);
+  const id = user.emergency_contacts[0]._id.toString();
+  await handler(contactRouter, "/contacts/:id", "patch")({ auth: { uid: "uid-20" }, params: { id }, body: { contact_name: "Alex Updated", phone_number: "09123456789" } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.id, id);
+  assert.equal(user.emergency_contacts[0].contact_name, "Alex Updated");
 });
 
-test("POST /devices/register reassigns a token and upserts the user's platform device", async (t) => {
-  let deleteFilter;
-  let upsert;
-  stub(t, UserProfile, "findOne", async () => ({ public_id: 20 }));
-  stub(t, Device, "deleteMany", async (filter) => { deleteFilter = filter; return { deletedCount: 1 }; });
-  stub(t, Counter, "nextPublicId", async (name) => { assert.equal(name, "devices"); return 45; });
-  stub(t, Device, "findOneAndUpdate", async (filter, update, options) => { upsert = { filter, update, options }; return { public_id: 45 }; });
+test("POST /devices/register updates an embedded platform device", async (t) => {
+  const user = profile();
+  let updateFilter;
+  stub(t, UserProfile, "findOne", async () => user);
+  stub(t, UserProfile, "updateMany", async (filter) => { updateFilter = filter; });
   const res = response();
   const token = "x".repeat(24);
   await handler(deviceRouter, "/devices/register", "post")({ auth: { uid: "uid-20" }, body: { token: `  ${token}  `, platform: " IOS " } }, res);
-  assert.deepEqual(deleteFilter, { fcm_token: token, user_id: { $ne: 20 } });
-  assert.deepEqual(upsert.filter, { user_id: 20, platform: "ios" });
-  assert.equal(upsert.update.$set.fcm_token, token);
-  assert.equal(upsert.update.$setOnInsert.public_id, 45);
-  assert.equal(upsert.options.upsert, true);
+  assert.equal(updateFilter["devices.fcm_token"], token);
+  assert.equal(updateFilter._id.$ne.toString(), user._id.toString());
+  assert.equal(user.devices[0].fcm_token, token);
+  assert.equal(user.devices[0].platform, "ios");
   assert.deepEqual(res.body, { ok: true });
 });

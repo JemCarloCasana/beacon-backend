@@ -1,7 +1,6 @@
 import admin from "../firebaseAdmin.js";
-import { UserNotification } from "../models/UserNotification.js";
-import { Counter } from "../models/Counter.js";
-import { Device, Friendship } from "../models/Remaining.js";
+import { FriendConnection, Notification, ReducedUserProfile as UserProfile } from "../models/Reduced.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 let customSendMulticast = null;
 
@@ -9,13 +8,7 @@ export function setUserNotificationMulticastSenderForTests(sendFn) {
   customSendMulticast = typeof sendFn === "function" ? sendFn : null;
 }
 
-function toPositiveIntegerOrNull(value) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return null;
-  }
-  return parsed;
-}
+const toObjectIdString = (value) => parseObjectId(typeof value === "string" ? value : value?.toString())?.toString() ?? null;
 
 function toIso(value) {
   if (!value) {
@@ -58,8 +51,8 @@ function normalizeTraceContext(trace) {
   if (trace.requestId != null) normalized.requestId = String(trace.requestId);
   if (trace.action != null) normalized.action = String(trace.action);
   if (trace.entityType != null) normalized.entityType = String(trace.entityType);
-  if (trace.entityId != null) normalized.entityId = Number(trace.entityId);
-  if (trace.recipientUserId != null) normalized.recipientUserId = Number(trace.recipientUserId);
+  if (trace.entityId != null) normalized.entityId = String(trace.entityId);
+  if (trace.recipientUserId != null) normalized.recipientUserId = String(trace.recipientUserId);
   if (trace.notificationType != null) normalized.notificationType = String(trace.notificationType);
   if (trace.status != null) normalized.status = String(trace.status);
   return normalized;
@@ -97,14 +90,8 @@ export function normalizeUserNotificationRow(row) {
     ...metadata,
   };
 
-  const incidentId = toPositiveIntegerOrNull(normalized.incident_id);
-  const sosId = toPositiveIntegerOrNull(normalized.sos_id);
-  if (incidentId != null) {
-    normalized.incident_id = incidentId;
-  }
-  if (sosId != null) {
-    normalized.sos_id = sosId;
-  }
+  if (normalized.incident_id != null) normalized.incident_id = String(normalized.incident_id);
+  if (normalized.sos_id != null) normalized.sos_id = String(normalized.sos_id);
 
   const createdAt = toIso(normalized.created_at);
   if (createdAt != null) {
@@ -127,8 +114,8 @@ export function toUserNotificationRow(doc) {
     return doc;
   }
   return {
-    id: doc.public_id,
-    recipient_user_id: doc.recipient_user_id,
+    id: doc._id.toString(),
+    recipient_user_id: doc.recipient_id.toString(),
     type: doc.type,
     title: doc.title,
     message: doc.message,
@@ -198,9 +185,9 @@ function buildFriendSosTerminalNotificationTitle(status) {
 }
 
 export function buildUserLifecycleNotification(input) {
-  const recipientUserId = toPositiveIntegerOrNull(input?.recipient_user_id);
+  const recipientUserId = toObjectIdString(input?.recipient_user_id);
   const entityType = typeof input?.entity_type === "string" ? input.entity_type.trim().toLowerCase() : "";
-  const entityId = toPositiveIntegerOrNull(input?.entity_id);
+  const entityId = toObjectIdString(input?.entity_id);
   const status = typeof input?.status === "string" ? input.status.trim().toLowerCase() : "";
   const assignedUnit =
     typeof input?.assigned_unit === "string" && input.assigned_unit.trim()
@@ -327,7 +314,11 @@ async function sendMulticastWithCleanup({ tokens, title, body, data, trace = {} 
     });
 
     if (badTokens.length > 0) {
-      await Device.updateMany({ fcm_token: { $in: badTokens } }, { $set: { is_active: false, updated_at: new Date() } });
+      await UserProfile.updateMany(
+        { "devices.fcm_token": { $in: badTokens } },
+        { $set: { "devices.$[device].is_active": false, "devices.$[device].updated_at": new Date() } },
+        { arrayFilters: [{ "device.fcm_token": { $in: badTokens } }] }
+      );
     }
 
     logNotificationTrace("push_result", {
@@ -382,13 +373,16 @@ export async function notifyUserLifecycleEvent(input) {
 
   logNotificationTrace("start", resolvedTrace);
 
-  const publicId = await Counter.nextPublicId("user_notifications");
-  const created = await UserNotification.create({
-    public_id: publicId,
-    recipient_user_id: built.recipientUserId,
+  const created = await Notification.create({
+    record_type: "user",
+    recipient_type: "user",
+    recipient_id: parseObjectId(built.recipientUserId),
     type: built.type,
     title: built.title,
     message: built.message,
+    source: built.type === "incident_update"
+      ? { type: "incident_report", id: parseObjectId(built.metadata.incident_id) }
+      : { type: "sos_record", id: parseObjectId(built.metadata.sos_id) },
     metadata: built.metadata,
     is_read: false,
     created_at: new Date(),
@@ -411,8 +405,8 @@ export async function notifyUserLifecycleEvent(input) {
 
   let tokens = [];
   try {
-    const deviceRows = await Device.find({ user_id: built.recipientUserId, is_active: true }).select({ fcm_token: 1 }).lean();
-    tokens = deviceRows.map((row) => row.fcm_token).filter(Boolean);
+    const profile = await UserProfile.findById(built.recipientUserId).select({ devices: 1 }).lean();
+    tokens = (profile?.devices ?? []).filter((device) => device.is_active).map((device) => device.fcm_token).filter(Boolean);
   } catch (err) {
     console.error("[user-notifications] failed to load device tokens:", err?.message || err, {
       ...resolvedTrace,
@@ -476,8 +470,8 @@ export async function notifyUserLifecycleEvent(input) {
 }
 
 export async function notifySosFriendsTerminalEvent(input) {
-  const ownerUserId = toPositiveIntegerOrNull(input?.owner_user_id);
-  const sosId = toPositiveIntegerOrNull(input?.sos_id);
+  const ownerUserId = toObjectIdString(input?.owner_user_id);
+  const sosId = toObjectIdString(input?.sos_id);
   const terminalOutcome =
     typeof input?.terminal_outcome === "string" ? input.terminal_outcome.trim().toLowerCase() : "";
 
@@ -506,9 +500,9 @@ export async function notifySosFriendsTerminalEvent(input) {
 
   let friendUserIds = [];
   try {
-    const friendshipRows = await Friendship.find({ $or: [{ user_id: ownerUserId }, { friend_user_id: ownerUserId }] }).lean();
-    friendUserIds = friendshipRows.map((row) => Number(row.user_id) === ownerUserId ? row.friend_user_id : row.user_id)
-      .map(toPositiveIntegerOrNull).filter(Boolean);
+    const ownerId = parseObjectId(ownerUserId);
+    const friendshipRows = await FriendConnection.find({ record_type: "friendship", user_ids: ownerId }).lean();
+    friendUserIds = [...new Map(friendshipRows.flatMap((row) => row.user_ids.filter((id) => !id.equals(ownerId)).map((id) => [id.toString(), id]))).values()];
   } catch (err) {
     console.error("[user-notifications] failed to load friend recipients:", err?.message || err, {
       ...trace,
@@ -535,8 +529,8 @@ export async function notifySosFriendsTerminalEvent(input) {
 
   let tokens = [];
   try {
-    const deviceRows = await Device.find({ user_id: { $in: friendUserIds }, is_active: true }).select({ fcm_token: 1 }).lean();
-    tokens = deviceRows.map((row) => row.fcm_token).filter(Boolean);
+    const friends = await UserProfile.find({ _id: { $in: friendUserIds } }).select({ devices: 1 }).lean();
+    tokens = friends.flatMap((friend) => friend.devices).filter((device) => device.is_active).map((device) => device.fcm_token).filter(Boolean);
   } catch (err) {
     console.error("[user-notifications] failed to load friend device tokens:", err?.message || err, {
       ...trace,
@@ -546,7 +540,7 @@ export async function notifySosFriendsTerminalEvent(input) {
     });
     return {
       ok: true,
-      recipients: friendUserIds,
+      recipients: friendUserIds.map((id) => id.toString()),
       push: { attempted: false, error: "token_lookup_failed" },
     };
   }
@@ -593,7 +587,7 @@ export async function notifySosFriendsTerminalEvent(input) {
 
   return {
     ok: true,
-    recipients: friendUserIds,
+    recipients: friendUserIds.map((id) => id.toString()),
     push: pushResult.push,
   };
 }

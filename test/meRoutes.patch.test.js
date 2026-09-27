@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import mongoose from "mongoose";
 
 import router from "../src/routes/meRoutes.js";
 import { requireAuth } from "../src/middleware/requireAuth.js";
-import { UserProfile } from "../src/models/Remaining.js";
+import { ReducedUserProfile as UserProfile } from "../src/models/Reduced.js";
 
 function findRouteHandler(path, method) {
   const layer = router.stack.find(
@@ -33,7 +34,7 @@ function createRes() {
 const patchMeHandler = findRouteHandler("/me", "patch");
 
 function mockProfile(values) {
-  return { public_id: values.id, firebase_uid: values.firebase_uid, email: values.email, full_name: values.full_name, phone_number: values.phone_number, role: values.role, profile_image_url: values.profile_image_url, save: async () => {} };
+  return { _id: new mongoose.Types.ObjectId(), firebase_uid: values.firebase_uid, email: values.email, full_name: values.full_name, phone_number: values.phone_number, role: values.role, profile_image_url: values.profile_image_url, save: async () => {} };
 }
 
 test("PATCH /me success update one field", async (t) => {
@@ -42,7 +43,8 @@ test("PATCH /me success update one field", async (t) => {
     UserProfile.findOne = originalFindOne;
   });
 
-  UserProfile.findOne = async () => mockProfile({ id: 10, firebase_uid: "uid-1", email: "user@example.com", full_name: "Old Name", phone_number: "+12345678901", role: "student" });
+  const profile = mockProfile({ firebase_uid: "uid-1", email: "user@example.com", full_name: "Old Name", phone_number: "+12345678901", role: "student" });
+  UserProfile.findOne = async () => profile;
 
   const req = {
     auth: { uid: "uid-1" },
@@ -54,7 +56,7 @@ test("PATCH /me success update one field", async (t) => {
 
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body, {
-    id: 10,
+    id: profile._id.toString(),
     firebase_uid: "uid-1",
     email: "user@example.com",
     full_name: "Updated Name",
@@ -83,7 +85,7 @@ test("PATCH /me updates role only and normalizes mixed-case input", async (t) =>
 
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body, {
-    id: 12,
+    id: profile._id.toString(),
     firebase_uid: "uid-role-only",
     email: "roleonly@example.com",
     full_name: "Role Only",
@@ -119,7 +121,7 @@ test("PATCH /me success update all fields", async (t) => {
 
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body, {
-    id: 11,
+    id: profile._id.toString(),
     firebase_uid: "uid-2",
     email: "allfields@example.com",
     full_name: "All Fields",
@@ -156,7 +158,7 @@ test("PATCH /me returns current user unchanged when no fields are provided", asy
 
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body, {
-    id: 13,
+    id: profile._id.toString(),
     firebase_uid: "uid-noop",
     email: "noop@example.com",
     full_name: "No Op",

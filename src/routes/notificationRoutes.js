@@ -1,8 +1,9 @@
 import express from "express";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import { normalizeUserNotificationRow, toUserNotificationRow } from "../services/userNotifications.js";
-import { UserNotification } from "../models/UserNotification.js";
+import { Notification } from "../models/Reduced.js";
 import { findProfileByUid } from "../services/userProfiles.js";
+import { parseObjectId } from "../utils/objectId.js";
 
 const router = express.Router();
 
@@ -15,7 +16,7 @@ function applyNotificationNoStoreHeaders(res) {
 
 async function getCurrentUserId(firebaseUid) {
   const profile = await findProfileByUid(firebaseUid);
-  return profile ? Number(profile.public_id) : null;
+  return profile?._id ?? null;
 }
 
 router.get("/notifications", requireAppAuth, async (req, res) => {
@@ -26,8 +27,8 @@ router.get("/notifications", requireAppAuth, async (req, res) => {
       return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
     }
 
-    const docs = await UserNotification.find({ recipient_user_id: userId })
-      .sort({ created_at: -1, public_id: -1 })
+    const docs = await Notification.find({ record_type: "user", recipient_type: "user", recipient_id: userId })
+      .sort({ created_at: -1, _id: -1 })
       .lean();
 
     return res.json(docs.map((doc) => normalizeUserNotificationRow(toUserNotificationRow(doc))));
@@ -40,8 +41,8 @@ router.get("/notifications", requireAppAuth, async (req, res) => {
 router.patch("/notifications/:id/read", requireAppAuth, async (req, res) => {
   try {
     applyNotificationNoStoreHeaders(res);
-    const notificationId = Number(req.params.id);
-    if (!Number.isInteger(notificationId) || notificationId <= 0) {
+    const notificationId = parseObjectId(req.params.id);
+    if (!notificationId) {
       return res.status(400).json({ message: "Invalid notification id" });
     }
 
@@ -50,8 +51,8 @@ router.patch("/notifications/:id/read", requireAppAuth, async (req, res) => {
       return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
     }
 
-    const doc = await UserNotification.findOneAndUpdate(
-      { public_id: notificationId, recipient_user_id: userId },
+    const doc = await Notification.findOneAndUpdate(
+      { _id: notificationId, record_type: "user", recipient_id: userId },
       { $set: { is_read: true } },
       { new: true }
     ).lean();

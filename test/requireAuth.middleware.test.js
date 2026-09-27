@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { requireAuth, setVerifyIdTokenForTests } from "../src/middleware/requireAuth.js";
 import { requireAppAuth } from "../src/middleware/requireAppAuth.js";
-import { Counter } from "../src/models/Counter.js";
-import { UserProfile } from "../src/models/Remaining.js";
+import mongoose from "mongoose";
+import { ReducedUserProfile as UserProfile } from "../src/models/Reduced.js";
 
 function response() {
   return { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
@@ -17,10 +17,9 @@ function stub(t, model, method, replacement) {
 
 async function runAppAuth(t, decoded, existing, onCreate = () => {}) {
   stub(t, UserProfile, "findOne", async () => existing);
-  stub(t, Counter, "nextPublicId", async () => 21);
   stub(t, UserProfile, "create", async (values) => {
     onCreate(values);
-    return { public_id: 21, ...values };
+    return { _id: new mongoose.Types.ObjectId(), ...values };
   });
   setVerifyIdTokenForTests(async () => decoded);
   t.after(() => setVerifyIdTokenForTests(null));
@@ -64,7 +63,7 @@ test("requireAppAuth bootstraps a first-time profile using the token name", asyn
   assert.equal(created.firebase_uid, "uid-app-1");
   assert.equal(created.full_name, "App User");
   assert.equal(created.email, "app@example.com");
-  assert.equal(created.public_id, 21);
+  assert.equal(created.public_id, undefined);
 });
 
 test("requireAppAuth uses the email-derived name for a placeholder token name", async (t) => {
