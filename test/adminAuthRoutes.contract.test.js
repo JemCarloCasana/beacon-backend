@@ -9,7 +9,11 @@ if (!process.env.ADMIN_JWT_SECRET) {
 
 const { default: adminAuthRouter } = await import("../src/routes/adminAuthRoutes.js");
 const { default: adminMeRouter } = await import("../src/routes/adminMeRoutes.js");
-const { pool } = await import("../src/db.js");
+const { AdminAccount, Role } = await import("../src/models/Remaining.js");
+
+function queryResult(value) {
+  return { select() { return this; }, lean: async () => value };
+}
 
 function findRouteStack(router, path, method) {
   const layer = router.stack.find(
@@ -115,22 +119,15 @@ test("signup rejects password with fewer than 3 classes", async () => {
 });
 
 test("signup rejects duplicate email with 409", async (t) => {
-  const originalQuery = pool.query;
+  const originalRoleFindOne = Role.findOne;
+  const originalAdminFindOne = AdminAccount.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    Role.findOne = originalRoleFindOne;
+    AdminAccount.findOne = originalAdminFindOne;
   });
 
-  let callIndex = 0;
-  pool.query = async () => {
-    callIndex += 1;
-    if (callIndex === 1) {
-      return { rowCount: 1, rows: [{ id: 2 }] };
-    }
-    if (callIndex === 2) {
-      return { rowCount: 1, rows: [{ id: 9 }] };
-    }
-    return { rowCount: 0, rows: [] };
-  };
+  Role.findOne = () => queryResult({ public_id: 2 });
+  AdminAccount.findOne = () => queryResult({ public_id: 9 });
 
   const req = {
     body: {
@@ -161,12 +158,12 @@ test("login rejects missing fields", async () => {
 });
 
 test("login rejects bad credentials", async (t) => {
-  const originalQuery = pool.query;
+  const originalFindOne = AdminAccount.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminAccount.findOne = originalFindOne;
   });
 
-  pool.query = async () => ({ rowCount: 0, rows: [] });
+  AdminAccount.findOne = () => queryResult(null);
 
   const req = {
     body: {
@@ -183,37 +180,13 @@ test("login rejects bad credentials", async (t) => {
 });
 
 test("login accepts valid credentials and returns token", async (t) => {
-  const originalQuery = pool.query;
+  const originalFindOne = AdminAccount.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminAccount.findOne = originalFindOne;
   });
 
   const passwordHash = await bcrypt.hash("Abcdef123!", 12);
-  let callIndex = 0;
-
-  pool.query = async () => {
-    callIndex += 1;
-    if (callIndex === 1) {
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            id: 17,
-            email: "valid@example.com",
-            full_name: "Valid Admin",
-            password_hash: passwordHash,
-            role_id: 1,
-            status: "active",
-            role: "personnel"
-          }
-        ]
-      };
-    }
-    return {
-      rowCount: 1,
-      rows: [{ permissions: ["manage_users"] }]
-    };
-  };
+  AdminAccount.findOne = () => queryResult({ public_id: 17, email: "valid@example.com", full_name: "Valid Admin", password_hash: passwordHash, role_id: 1, status: "active", role: "personnel", permission_names: ["manage_users"] });
 
   const req = {
     body: {
@@ -232,26 +205,13 @@ test("login accepts valid credentials and returns token", async (t) => {
 });
 
 test("login rejects deactivated account with 403", async (t) => {
-  const originalQuery = pool.query;
+  const originalFindOne = AdminAccount.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminAccount.findOne = originalFindOne;
   });
 
   const passwordHash = await bcrypt.hash("Abcdef123!", 12);
-  pool.query = async () => ({
-    rowCount: 1,
-    rows: [
-      {
-        id: 18,
-        email: "deactivated@example.com",
-        full_name: "Deactivated User",
-        password_hash: passwordHash,
-        role_id: 2,
-        status: "deactivated",
-        role: "personnel"
-      }
-    ]
-  });
+  AdminAccount.findOne = () => queryResult({ public_id: 18, email: "deactivated@example.com", full_name: "Deactivated User", password_hash: passwordHash, role_id: 2, status: "deactivated", role: "personnel" });
 
   const req = {
     body: {
@@ -296,9 +256,9 @@ test("/admin/me returns 401 with invalid token", async () => {
 });
 
 test("/admin/me returns role and permissions for valid token", async (t) => {
-  const originalQuery = pool.query;
+  const originalFindOne = AdminAccount.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminAccount.findOne = originalFindOne;
   });
 
   const token = jwt.sign(
@@ -307,24 +267,7 @@ test("/admin/me returns role and permissions for valid token", async (t) => {
     { expiresIn: "1h" }
   );
 
-  pool.query = async (sql) => {
-    if (sql.includes("SELECT id, status")) {
-      return {
-        rowCount: 1,
-        rows: [{ id: 5, status: "active" }]
-      };
-    }
-    if (sql.includes("SELECT a.id, a.email, a.full_name, a.role_id, r.name AS role")) {
-      return {
-        rowCount: 1,
-        rows: [{ id: 5, email: "p@example.com", full_name: "P User", role_id: 2, role: "personnel" }]
-      };
-    }
-    return {
-      rowCount: 1,
-      rows: [{ permissions: ["manage_reports"] }]
-    };
-  };
+  AdminAccount.findOne = () => queryResult({ public_id: 5, status: "active", email: "p@example.com", full_name: "P User", role_id: 2, role: "personnel", permission_names: ["manage_reports"] });
 
   const req = {
     headers: {
@@ -342,9 +285,9 @@ test("/admin/me returns role and permissions for valid token", async (t) => {
 });
 
 test("/admin/me middleware returns 403 for deactivated account", async (t) => {
-  const originalQuery = pool.query;
+  const originalFindOne = AdminAccount.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    AdminAccount.findOne = originalFindOne;
   });
 
   const token = jwt.sign(
@@ -353,10 +296,7 @@ test("/admin/me middleware returns 403 for deactivated account", async (t) => {
     { expiresIn: "1h" }
   );
 
-  pool.query = async () => ({
-    rowCount: 1,
-    rows: [{ id: 6, status: "deactivated" }]
-  });
+  AdminAccount.findOne = () => queryResult({ public_id: 6, status: "deactivated" });
 
   const req = {
     headers: {

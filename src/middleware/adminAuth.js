@@ -1,7 +1,5 @@
 import jwt from "jsonwebtoken";
-import { pool } from "../db.js";
 import { auditLog } from "../utils/auditLog.js";
-import { isMongoConnected } from "../mongo.js";
 import { AdminAccount } from "../models/Remaining.js";
 
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
@@ -16,40 +14,13 @@ export function assertAccountActive(account) {
 }
 
 export async function getAdminAuthAccount(adminId) {
-  if (isMongoConnected()) {
-    const account = await AdminAccount.findOne({ public_id: adminId }).select({ public_id: 1, status: 1 }).lean();
-    return account ? { id: Number(account.public_id), status: account.status } : null;
-  }
-  const result = await pool.query(
-    `
-    SELECT id, status
-    FROM admins
-    WHERE id = $1
-    LIMIT 1
-    `,
-    [adminId]
-  );
-  return result.rows[0] ?? null;
+  const account = await AdminAccount.findOne({ public_id: adminId }).select({ public_id: 1, status: 1 }).lean();
+  return account ? { id: Number(account.public_id), status: account.status } : null;
 }
 
 export async function getAdminPermissions(adminId) {
-  if (isMongoConnected()) {
-    const account = await AdminAccount.findOne({ public_id: adminId }).select({ permission_names: 1 }).lean();
-    return account?.permission_names ?? [];
-  }
-  const result = await pool.query(
-    `
-    SELECT COALESCE(array_agg(DISTINCT p.name) FILTER (WHERE p.name IS NOT NULL), '{}') AS permissions
-    FROM admins a
-    JOIN roles r ON r.id = a.role_id
-    LEFT JOIN role_permissions rp ON rp.role_id = r.id
-    LEFT JOIN permissions p ON p.id = rp.permission_id
-    WHERE a.id = $1
-    `,
-    [adminId]
-  );
-
-  return result.rows[0]?.permissions ?? [];
+  const account = await AdminAccount.findOne({ public_id: adminId }).select({ permission_names: 1 }).lean();
+  return account?.permission_names ?? [];
 }
 
 export async function requireAuth(req, res, next) {

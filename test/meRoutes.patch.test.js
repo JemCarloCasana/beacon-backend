@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import router from "../src/routes/meRoutes.js";
-import { pool } from "../src/db.js";
 import { requireAuth } from "../src/middleware/requireAuth.js";
+import { UserProfile } from "../src/models/Remaining.js";
 
 function findRouteHandler(path, method) {
   const layer = router.stack.find(
@@ -32,26 +32,17 @@ function createRes() {
 
 const patchMeHandler = findRouteHandler("/me", "patch");
 
+function mockProfile(values) {
+  return { public_id: values.id, firebase_uid: values.firebase_uid, email: values.email, full_name: values.full_name, phone_number: values.phone_number, role: values.role, profile_image_url: values.profile_image_url, save: async () => {} };
+}
+
 test("PATCH /me success update one field", async (t) => {
-  const originalQuery = pool.query;
+  const originalFindOne = UserProfile.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    UserProfile.findOne = originalFindOne;
   });
 
-  pool.query = async () => ({
-    rowCount: 1,
-    rows: [
-      {
-        id: 10,
-        firebase_uid: "uid-1",
-        email: "user@example.com",
-        full_name: "Updated Name",
-        phone_number: "+12345678901",
-        role: "student",
-        profile_image_url: null
-      }
-    ]
-  });
+  UserProfile.findOne = async () => mockProfile({ id: 10, firebase_uid: "uid-1", email: "user@example.com", full_name: "Old Name", phone_number: "+12345678901", role: "student" });
 
   const req = {
     auth: { uid: "uid-1" },
@@ -74,29 +65,13 @@ test("PATCH /me success update one field", async (t) => {
 });
 
 test("PATCH /me updates role only and normalizes mixed-case input", async (t) => {
-  const originalQuery = pool.query;
-  const calls = [];
+  const originalFindOne = UserProfile.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    UserProfile.findOne = originalFindOne;
   });
 
-  pool.query = async (text, values = []) => {
-    calls.push({ text, values });
-    return {
-      rowCount: 1,
-      rows: [
-        {
-          id: 12,
-          firebase_uid: "uid-role-only",
-          email: "roleonly@example.com",
-          full_name: "Role Only",
-          phone_number: "+639123456789",
-          role: "student",
-          profile_image_url: null
-        }
-      ]
-    };
-  };
+  const profile = mockProfile({ id: 12, firebase_uid: "uid-role-only", email: "roleonly@example.com", full_name: "Role Only", phone_number: "+639123456789", role: "citizen" });
+  UserProfile.findOne = async () => profile;
 
   const req = {
     auth: { uid: "uid-role-only" },
@@ -116,34 +91,17 @@ test("PATCH /me updates role only and normalizes mixed-case input", async (t) =>
     role: "student",
     profile_image_url: null
   });
-  assert.match(calls[0].text, /SET role = \$1, updated_at = NOW\(\)/);
-  assert.deepEqual(calls[0].values, ["student", "uid-role-only"]);
+  assert.equal(profile.role, "student");
 });
 
 test("PATCH /me success update all fields", async (t) => {
-  const originalQuery = pool.query;
-  const calls = [];
+  const originalFindOne = UserProfile.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    UserProfile.findOne = originalFindOne;
   });
 
-  pool.query = async (text, values = []) => {
-    calls.push({ text, values });
-    return {
-      rowCount: 1,
-      rows: [
-        {
-          id: 11,
-          firebase_uid: "uid-2",
-          email: "allfields@example.com",
-          full_name: "All Fields",
-          phone_number: "+19995554444",
-          role: "student",
-          profile_image_url: "https://cdn.example.com/p.jpg"
-        }
-      ]
-    };
-  };
+  const profile = mockProfile({ id: 11, firebase_uid: "uid-2", email: "old@example.com", full_name: "Old Name", phone_number: "000", role: "citizen", profile_image_url: null });
+  UserProfile.findOne = async () => profile;
 
   const req = {
     auth: { uid: "uid-2" },
@@ -169,43 +127,23 @@ test("PATCH /me success update all fields", async (t) => {
     role: "student",
     profile_image_url: "https://cdn.example.com/p.jpg"
   });
-  assert.match(
-    calls[0].text,
-    /SET full_name = \$1, email = \$2, phone_number = \$3, role = \$4, profile_image_url = \$5, updated_at = NOW\(\)/
-  );
-  assert.deepEqual(calls[0].values, [
-    "All Fields",
-    "allfields@example.com",
-    "+19995554444",
-    "student",
-    "https://cdn.example.com/p.jpg",
-    "uid-2"
-  ]);
+  assert.equal(profile.full_name, "All Fields");
+  assert.equal(profile.email, "allfields@example.com");
+  assert.equal(profile.phone_number, "+19995554444");
+  assert.equal(profile.role, "student");
+  assert.equal(profile.profile_image_url, "https://cdn.example.com/p.jpg");
 });
 
 test("PATCH /me returns current user unchanged when no fields are provided", async (t) => {
-  const originalQuery = pool.query;
-  const calls = [];
+  const originalFindOne = UserProfile.findOne;
   t.after(() => {
-    pool.query = originalQuery;
+    UserProfile.findOne = originalFindOne;
   });
 
-  pool.query = async (text, values = []) => {
-    calls.push({ text, values });
-    return {
-      rowCount: 1,
-      rows: [
-        {
-          id: 13,
-          firebase_uid: "uid-noop",
-          email: "noop@example.com",
-          full_name: "No Op",
-          phone_number: null,
-          role: "citizen",
-          profile_image_url: null
-        }
-      ]
-    };
+  const profile = mockProfile({ id: 13, firebase_uid: "uid-noop", email: "noop@example.com", full_name: "No Op", phone_number: null, role: "citizen" });
+  UserProfile.findOne = async (filter) => {
+    assert.deepEqual(filter, { firebase_uid: "uid-noop" });
+    return profile;
   };
 
   const req = {
@@ -226,8 +164,6 @@ test("PATCH /me returns current user unchanged when no fields are provided", asy
     role: "citizen",
     profile_image_url: null
   });
-  assert.match(calls[0].text, /SELECT[\s\S]*FROM users[\s\S]*WHERE firebase_uid = \$1/);
-  assert.deepEqual(calls[0].values, ["uid-noop"]);
 });
 
 test("requireAuth returns 401 without token", async () => {

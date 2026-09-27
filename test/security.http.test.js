@@ -6,9 +6,9 @@ process.env.WRITE_RATE_LIMIT_WINDOW_MS = "60000";
 process.env.WRITE_RATE_LIMIT_MAX = "3";
 
 const { app } = await import("../server.js");
-const { pool } = await import("../src/db.js");
 const { Broadcast } = await import("../src/models/Broadcast.js");
 const { BroadcastDelivery } = await import("../src/models/BroadcastDelivery.js");
+const { AdminAccount } = await import("../src/models/Remaining.js");
 const { auditLog, redactAuditValue } = await import("../src/utils/auditLog.js");
 
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
@@ -28,24 +28,20 @@ test.after(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-function stubPoolForAdmin(adminId, permissions) {
-  const originalQuery = pool.query;
-  pool.query = async (sql, params) => {
-    const text = String(sql);
-    if (/FROM admins/i.test(text) && /WHERE id = \$1/i.test(text)) {
-      return { rowCount: 1, rows: [{ id: adminId, status: "active" }] };
-    }
-    if (/array_agg/i.test(text)) {
-      return { rowCount: 1, rows: [{ permissions }] };
-    }
-    if (/r\.name AS role/i.test(text)) {
-      return { rowCount: 1, rows: [{ role: "admin" }] };
-    }
-    throw new Error(`Unexpected SQL in security test: ${text}`);
-  };
+function stubMongoAdmin(adminId, permissions, role) {
+  const originalFindOne = AdminAccount.findOne;
+  AdminAccount.findOne = () => ({ select: (projection) => ({ lean: async () =>
+    projection?.permission_names ? { permission_names: permissions } : projection?.role ? { role } : { public_id: adminId, status: "active" },
+  }) });
   return () => {
-    pool.query = originalQuery;
+    AdminAccount.findOne = originalFindOne;
   };
+}
+
+function stubAdminLookup(t, replacement) {
+  const originalFindOne = AdminAccount.findOne;
+  AdminAccount.findOne = replacement;
+  t.after(() => { AdminAccount.findOne = originalFindOne; });
 }
 
 function adminToken(adminId, role = "admin", expiresIn = "7d") {
@@ -91,7 +87,7 @@ test("expired admin token returns 401", async () => {
 });
 
 test("personnel without manage_broadcasts gets 403 on draft delete", async () => {
-  const restorePool = stubPoolForAdmin(21, ["view_broadcasts"]);
+  const restoreMongo = stubMongoAdmin(21, ["view_broadcasts"], "personnel");
   const originalFindOneAndDelete = Broadcast.findOneAndDelete;
   Broadcast.findOneAndDelete = () => {
     throw new Error("handler must not run for forbidden personnel");
@@ -104,13 +100,13 @@ test("personnel without manage_broadcasts gets 403 on draft delete", async () =>
     assert.equal(res.status, 403);
     assert.deepEqual(await res.json(), { message: "Insufficient permissions" });
   } finally {
-    restorePool();
+    restoreMongo();
     Broadcast.findOneAndDelete = originalFindOneAndDelete;
   }
 });
 
 test("admin with manage_broadcasts passes the permission gate", async () => {
-  const restorePool = stubPoolForAdmin(9, ["manage_broadcasts", "view_broadcasts"]);
+  const restoreMongo = stubMongoAdmin(9, ["manage_broadcasts", "view_broadcasts"], "admin");
   const originalFindOneAndDelete = Broadcast.findOneAndDelete;
   const originalFindOne = Broadcast.findOne;
   const originalDeleteMany = BroadcastDelivery.deleteMany;
@@ -125,7 +121,7 @@ test("admin with manage_broadcasts passes the permission gate", async () => {
     assert.equal(res.status, 404);
     assert.deepEqual(await res.json(), { message: "Broadcast not found" });
   } finally {
-    restorePool();
+    restoreMongo();
     Broadcast.findOneAndDelete = originalFindOneAndDelete;
     Broadcast.findOne = originalFindOne;
     BroadcastDelivery.deleteMany = originalDeleteMany;
@@ -190,16 +186,9 @@ test("failed admin login emits a sanitized audit line", async (t) => {
   console.log = (...args) => {
     lines.push(args.map(String).join(" "));
   };
-  const originalQuery = pool.query;
-  pool.query = async (sql) => {
-    if (/lower\(a\.email\)/.test(String(sql))) {
-      return { rowCount: 0, rows: [] };
-    }
-    throw new Error(`Unexpected SQL in security test: ${String(sql)}`);
-  };
+  stubAdminLookup(t, () => ({ lean: async () => null }));
   t.after(() => {
     console.log = originalLog;
-    pool.query = originalQuery;
   });
 
   const res = await fetch(`${baseUrl}/admin/auth/login`, {

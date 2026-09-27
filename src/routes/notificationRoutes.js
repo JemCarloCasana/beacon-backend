@@ -1,9 +1,7 @@
 import express from "express";
-import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import { normalizeUserNotificationRow, toUserNotificationRow } from "../services/userNotifications.js";
 import { UserNotification } from "../models/UserNotification.js";
-import { isMongoConnected } from "../mongo.js";
 import { findProfileByUid } from "../services/userProfiles.js";
 
 const router = express.Router();
@@ -16,20 +14,8 @@ function applyNotificationNoStoreHeaders(res) {
 }
 
 async function getCurrentUserId(firebaseUid) {
-  if (isMongoConnected()) {
-    const profile = await findProfileByUid(firebaseUid);
-    return profile ? Number(profile.public_id) : null;
-  }
-  const result = await pool.query(
-    `
-    SELECT id
-    FROM users
-    WHERE firebase_uid = $1
-    LIMIT 1
-    `,
-    [firebaseUid]
-  );
-  return result.rowCount > 0 ? Number(result.rows[0].id) : null;
+  const profile = await findProfileByUid(firebaseUid);
+  return profile ? Number(profile.public_id) : null;
 }
 
 router.get("/notifications", requireAppAuth, async (req, res) => {

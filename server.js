@@ -127,7 +127,7 @@ app.get("/health/auth-metrics", (req, res) => {
 
 // Vercel has no long-lived startup phase; connect lazily per warm function.
 app.use(async (req, res, next) => {
-  if (!process.env.VERCEL || !process.env.MONGODB_URI || isMongoConnected()) {
+  if (!process.env.VERCEL || isMongoConnected()) {
     return next();
   }
 

@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import router from "../src/routes/meRoutes.js";
-import { pool } from "../src/db.js";
 import { requireAppAuth } from "../src/middleware/requireAppAuth.js";
+import { Counter } from "../src/models/Counter.js";
+import { FriendRequest, Friendship, UserProfile } from "../src/models/Remaining.js";
 
 function findRouteHandler(path, method) {
   const layer = router.stack.find(
@@ -35,66 +36,32 @@ const getMeHandler = findRouteHandler("/me", "get");
 const getUsersHandler = findRouteHandler("/users", "get");
 const searchUsersHandler = findRouteHandler("/users/search", "get");
 
-function createBootstrapClient({
-  existingBeaconCode = null,
-  insertRoleRecorder = null,
-} = {}) {
+function queryResult(value) {
   return {
-    released: false,
-    async query(text, values = []) {
-      if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") {
-        return { rowCount: 0, rows: [] };
-      }
-      if (text.includes("SELECT id, beacon_code")) {
-        if (existingBeaconCode) {
-          return { rowCount: 1, rows: [{ id: 1, beacon_code: existingBeaconCode }] };
-        }
-        return { rowCount: 0, rows: [] };
-      }
-      if (text.includes("SELECT 1 FROM users WHERE beacon_code = $1")) {
-        return { rowCount: 0, rows: [] };
-      }
-      if (text.includes("INSERT INTO users")) {
-        if (insertRoleRecorder) {
-          insertRoleRecorder(values[4]);
-        }
-        return {
-          rowCount: 1,
-          rows: [
-            {
-              id: 77,
-              firebase_uid: values[0],
-              email: values[1],
-              full_name: values[2],
-              phone_number: values[3],
-              role: values[4],
-              profile_image_url: null,
-              beacon_code: values[5],
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            },
-          ],
-        };
-      }
-      throw new Error(`Unexpected SQL in test: ${text}`);
-    },
-    release() {
-      this.released = true;
-    },
+    select() { return this; },
+    limit() { return this; },
+    lean: async () => value,
+    then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
   };
 }
 
+function profile(values) {
+  return { ...values, save: async () => {} };
+}
+
+function replaceMethod(t, model, method, replacement) {
+  const original = model[method];
+  model[method] = replacement;
+  t.after(() => { model[method] = original; });
+}
+
 test("POST /me/bootstrap accepts citizen and normalizes mixed-case role", async (t) => {
-  const originalConnect = pool.connect;
   let receivedRole = null;
-  const client = createBootstrapClient({
-    insertRoleRecorder: (role) => {
-      receivedRole = role;
-    },
-  });
-  pool.connect = async () => client;
-  t.after(() => {
-    pool.connect = originalConnect;
+  replaceMethod(t, UserProfile, "findOne", () => queryResult(null));
+  replaceMethod(t, Counter, "nextPublicId", async () => 77);
+  replaceMethod(t, UserProfile, "create", async (values) => {
+    receivedRole = values.role;
+    return profile({ ...values, profile_image_url: null });
   });
 
   const req = {
@@ -108,16 +75,12 @@ test("POST /me/bootstrap accepts citizen and normalizes mixed-case role", async 
   assert.equal(res.statusCode, 200);
   assert.equal(receivedRole, "citizen");
   assert.equal(res.body.role, "citizen");
-  assert.equal(client.released, true);
 });
 
 test("POST /me/bootstrap accepts student role", async (t) => {
-  const originalConnect = pool.connect;
-  const client = createBootstrapClient();
-  pool.connect = async () => client;
-  t.after(() => {
-    pool.connect = originalConnect;
-  });
+  replaceMethod(t, UserProfile, "findOne", () => queryResult(null));
+  replaceMethod(t, Counter, "nextPublicId", async () => 78);
+  replaceMethod(t, UserProfile, "create", async (values) => profile({ ...values, profile_image_url: null }));
 
   const req = {
     auth: { uid: "uid-student", email: "student@example.com" },
@@ -129,17 +92,9 @@ test("POST /me/bootstrap accepts student role", async (t) => {
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.role, "student");
-  assert.equal(client.released, true);
 });
 
-test("POST /me/bootstrap rejects missing role", async (t) => {
-  const originalConnect = pool.connect;
-  const client = createBootstrapClient();
-  pool.connect = async () => client;
-  t.after(() => {
-    pool.connect = originalConnect;
-  });
-
+test("POST /me/bootstrap rejects missing role", async () => {
   const req = {
     auth: { uid: "uid-missing-role", email: "missing-role@example.com" },
     body: { full_name: "Missing Role" },
@@ -150,17 +105,9 @@ test("POST /me/bootstrap rejects missing role", async (t) => {
 
   assert.equal(res.statusCode, 400);
   assert.deepEqual(res.body, { message: "Invalid role" });
-  assert.equal(client.released, true);
 });
 
-test("POST /me/bootstrap rejects unknown role", async (t) => {
-  const originalConnect = pool.connect;
-  const client = createBootstrapClient();
-  pool.connect = async () => client;
-  t.after(() => {
-    pool.connect = originalConnect;
-  });
-
+test("POST /me/bootstrap rejects unknown role", async () => {
   const req = {
     auth: { uid: "uid-unknown-role", email: "unknown-role@example.com" },
     body: { full_name: "Unknown Role", role: "teacher" },
@@ -171,20 +118,11 @@ test("POST /me/bootstrap rejects unknown role", async (t) => {
 
   assert.equal(res.statusCode, 400);
   assert.deepEqual(res.body, { message: "Invalid role" });
-  assert.equal(client.released, true);
 });
 
 test("POST /me/bootstrap updates role to latest submitted value on re-bootstrap", async (t) => {
-  const originalConnect = pool.connect;
-  const insertedRoles = [];
-  pool.connect = async () =>
-    createBootstrapClient({
-      existingBeaconCode: "BCN-ABC123",
-      insertRoleRecorder: (role) => insertedRoles.push(role),
-    });
-  t.after(() => {
-    pool.connect = originalConnect;
-  });
+  const existing = profile({ public_id: 79, firebase_uid: "uid-rebootstrap", email: "rebootstrap@example.com", full_name: "Rebootstrap User", phone_number: null, role: "citizen", status: "active", beacon_code: "BCN-ABC123" });
+  replaceMethod(t, UserProfile, "findOne", () => queryResult(existing));
 
   const firstRes = createRes();
   await bootstrapHandler(
@@ -207,50 +145,11 @@ test("POST /me/bootstrap updates role to latest submitted value on re-bootstrap"
   );
   assert.equal(secondRes.statusCode, 200);
   assert.equal(secondRes.body.role, "student");
-  assert.deepEqual(insertedRoles, ["citizen", "student"]);
+  assert.equal(existing.role, "student");
 });
 
 test("GET /me and GET /users return normalized app role values", async (t) => {
-  const originalQuery = pool.query;
-  t.after(() => {
-    pool.query = originalQuery;
-  });
-
-  pool.query = async (text, values) => {
-    if (text.includes("FROM users") && values[0] === "legacy-uid") {
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            id: 11,
-            firebase_uid: "legacy-uid",
-            email: "legacy@example.com",
-            full_name: "Legacy User",
-            phone_number: null,
-            role: "citizen",
-            profile_image_url: null,
-          },
-        ],
-      };
-    }
-    if (text.includes("FROM users") && values[0] === "new-uid") {
-      return {
-        rowCount: 1,
-        rows: [
-          {
-            id: 22,
-            firebase_uid: "new-uid",
-            email: "new@example.com",
-            full_name: "New User",
-            phone_number: null,
-            role: "student",
-            profile_image_url: null,
-          },
-        ],
-      };
-    }
-    throw new Error("Unexpected query");
-  };
+  replaceMethod(t, UserProfile, "findOne", ({ firebase_uid }) => queryResult(profile({ public_id: firebase_uid === "legacy-uid" ? 11 : 22, firebase_uid, email: firebase_uid === "legacy-uid" ? "legacy@example.com" : "new@example.com", full_name: firebase_uid === "legacy-uid" ? "Legacy User" : "New User", phone_number: null, role: firebase_uid === "legacy-uid" ? "citizen" : "student", profile_image_url: null })));
 
   const meRes = createRes();
   await getMeHandler({ auth: { uid: "legacy-uid" } }, meRes);
@@ -290,12 +189,7 @@ test("GET /users/search returns 400 for missing, empty, or too-short queries", a
 });
 
 test("GET /users/search returns 404 when the authenticated user has no profile row", async (t) => {
-  const originalQuery = pool.query;
-  t.after(() => {
-    pool.query = originalQuery;
-  });
-
-  pool.query = async () => ({ rowCount: 0, rows: [] });
+  replaceMethod(t, UserProfile, "findOne", () => queryResult(null));
 
   const req = {
     auth: { uid: "missing-user" },
@@ -310,57 +204,18 @@ test("GET /users/search returns 404 when the authenticated user has no profile r
 });
 
 test("GET /users/search performs case-insensitive multi-word discovery with stable ordering and friendship status", async (t) => {
-  const originalQuery = pool.query;
-  t.after(() => {
-    pool.query = originalQuery;
-  });
-
-  let queryCount = 0;
-  pool.query = async (text, values) => {
-    queryCount += 1;
-    if (queryCount === 1) {
-      assert.match(String(text), /SELECT id\s+FROM users\s+WHERE firebase_uid = \$1/i);
-      assert.deepEqual(values, ["search-uid"]);
-      return { rowCount: 1, rows: [{ id: 77 }] };
-    }
-
-    assert.match(String(text), /FROM users u/i);
-    assert.match(String(text), /LOWER\(u\.full_name\) LIKE \$4/i);
-    assert.match(String(text), /LOWER\(u\.full_name\) LIKE \$5/i);
-    assert.match(String(text), /u\.id <> \$1/i);
-    assert.match(String(text), /CASE\s+WHEN LOWER\(u\.full_name\) = \$2 THEN 0/i);
-    assert.deepEqual(values, [77, "john sm", "john sm%", "%john%", "%sm%", 20]);
-
-    return {
-      rowCount: 4,
-      rows: [
-        {
-          id: 11,
-          full_name: "John Smalls",
-          beacon_code: "BCN-JS1111",
-          friendship_status: "already_friends",
-        },
-        {
-          id: 12,
-          full_name: "Johnny Smalls",
-          beacon_code: "BCN-JS2222",
-          friendship_status: "incoming_pending",
-        },
-        {
-          id: 13,
-          full_name: "Alice Johnson Smith",
-          beacon_code: "BCN-AJS33",
-          friendship_status: "outgoing_pending",
-        },
-        {
-          id: 14,
-          full_name: "Elton John Smithe",
-          beacon_code: "BCN-EJS44",
-          friendship_status: "none",
-        },
-      ],
-    };
-  };
+  replaceMethod(t, UserProfile, "findOne", ({ firebase_uid }) => queryResult(firebase_uid === "search-uid" ? profile({ public_id: 77 }) : null));
+  replaceMethod(t, UserProfile, "find", () => queryResult([
+    { public_id: 11, full_name: "John Smalls", beacon_code: "BCN-JS1111" },
+    { public_id: 12, full_name: "Johnny Smalls", beacon_code: "BCN-JS2222" },
+    { public_id: 13, full_name: "Alice Johnson Smith", beacon_code: "BCN-AJS33" },
+    { public_id: 14, full_name: "Elton John Smithe", beacon_code: "BCN-EJS44" },
+  ]));
+  replaceMethod(t, Friendship, "find", () => queryResult([{ user_id: 77, friend_user_id: 11 }]));
+  replaceMethod(t, FriendRequest, "find", () => queryResult([
+    { requester_user_id: 12, addressee_user_id: 77, status: "pending" },
+    { requester_user_id: 77, addressee_user_id: 13, status: "pending" },
+  ]));
 
   const req = {
     auth: { uid: "search-uid" },
@@ -373,18 +228,6 @@ test("GET /users/search performs case-insensitive multi-word discovery with stab
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body, [
     {
-      id: 11,
-      full_name: "John Smalls",
-      beacon_code: "BCN-JS1111",
-      friendship_status: "already_friends",
-    },
-    {
-      id: 12,
-      full_name: "Johnny Smalls",
-      beacon_code: "BCN-JS2222",
-      friendship_status: "incoming_pending",
-    },
-    {
       id: 13,
       full_name: "Alice Johnson Smith",
       beacon_code: "BCN-AJS33",
@@ -395,6 +238,18 @@ test("GET /users/search performs case-insensitive multi-word discovery with stab
       full_name: "Elton John Smithe",
       beacon_code: "BCN-EJS44",
       friendship_status: "none",
+    },
+    {
+      id: 11,
+      full_name: "John Smalls",
+      beacon_code: "BCN-JS1111",
+      friendship_status: "already_friends",
+    },
+    {
+      id: 12,
+      full_name: "Johnny Smalls",
+      beacon_code: "BCN-JS2222",
+      friendship_status: "incoming_pending",
     },
   ]);
 });

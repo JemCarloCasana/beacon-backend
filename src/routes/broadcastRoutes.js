@@ -1,6 +1,4 @@
 import express from "express";
-import { pool } from "../db.js";
-import { isMongoConnected } from "../mongo.js";
 import { findProfileByUid } from "../services/userProfiles.js";
 import { requireAdminAuth, requirePermission, getAdminPermissions } from "../middleware/adminAuth.js";
 import { requireAuth as requireFirebaseAuth } from "../middleware/requireAuth.js";
@@ -95,31 +93,12 @@ async function resolveAuthenticatedInboxUserId(req, res) {
     return null;
   }
 
-  if (isMongoConnected()) {
-    const profile = await findProfileByUid(uid);
-    if (!profile) {
-      res.status(404).json({ message: "User account not found. Call /me/bootstrap first." });
-      return null;
-    }
-    return Number(profile.public_id);
-  }
-
-  const userResult = await pool.query(
-    `
-    SELECT id
-    FROM users
-    WHERE firebase_uid = $1
-    LIMIT 1
-    `,
-    [uid]
-  );
-
-  if (userResult.rowCount === 0) {
+  const profile = await findProfileByUid(uid);
+  if (!profile) {
     res.status(404).json({ message: "User account not found. Call /me/bootstrap first." });
     return null;
   }
-
-  return Number(userResult.rows[0].id);
+  return Number(profile.public_id);
 }
 
 router.post(
@@ -282,27 +261,9 @@ router.get("/admin/broadcasts", requireAdminAuth, async (req, res) => {
       return res.status(401).json({ message: "Unauthorized" });
     }
 
-    if (isMongoConnected()) {
-      const permissions = await getAdminPermissions(adminId);
-      if (permissions.length > 0 && !permissions.includes("view_broadcasts")) {
-        return res.status(403).json({ message: "Insufficient permissions" });
-      }
-    } else {
-      const viewPermissionExistsResult = await pool.query(
-        `
-        SELECT 1
-        FROM permissions
-        WHERE name = 'view_broadcasts'
-        LIMIT 1
-        `
-      );
-
-      if (viewPermissionExistsResult.rowCount > 0) {
-        const permissions = await getAdminPermissions(adminId);
-        if (!permissions.includes("view_broadcasts")) {
-          return res.status(403).json({ message: "Insufficient permissions" });
-        }
-      }
+    const permissions = await getAdminPermissions(adminId);
+    if (permissions.length > 0 && !permissions.includes("view_broadcasts")) {
+      return res.status(403).json({ message: "Insufficient permissions" });
     }
 
     const sent = req.query?.sent;
@@ -574,19 +535,10 @@ router.delete(
   requirePermission("manage_broadcasts"),
   async (req, res, next) => {
     try {
-      let role;
-      if (isMongoConnected()) {
-        const admin = await AdminAccount.findOne({ public_id: req.admin.adminId })
-          .select({ role: 1 })
-          .lean();
-        role = admin?.role;
-      } else {
-        const result = await pool.query(
-          "SELECT r.name AS role FROM admins a JOIN roles r ON r.id = a.role_id WHERE a.id = $1",
-          [req.admin.adminId]
-        );
-        role = result.rows[0]?.role;
-      }
+      const admin = await AdminAccount.findOne({ public_id: req.admin.adminId })
+        .select({ role: 1 })
+        .lean();
+      const role = admin?.role;
 
       if (role !== "admin") {
         auditLog({

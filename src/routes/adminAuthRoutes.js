@@ -1,9 +1,7 @@
 import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import { pool } from "../db.js";
-import { assertAccountActive, getAdminPermissions } from "../middleware/adminAuth.js";
-import { isMongoConnected } from "../mongo.js";
+import { assertAccountActive } from "../middleware/adminAuth.js";
 import { AdminAccount, Role } from "../models/Remaining.js";
 import { Counter } from "../models/Counter.js";
 import {
@@ -47,86 +45,43 @@ function logAdminLoginDebug({ submittedEmail, adminFound, status, compareResult 
 }
 
 async function getRoleIdByName(roleName) {
-  if (isMongoConnected()) {
-    const role = await Role.findOne({ name: roleName }).select({ public_id: 1 }).lean();
-    return role?.public_id ?? null;
-  }
-  const r = await pool.query("SELECT id FROM roles WHERE name = $1", [roleName]);
-  return r.rowCount ? r.rows[0].id : null;
+  const role = await Role.findOne({ name: roleName }).select({ public_id: 1 }).lean();
+  return role?.public_id ?? null;
 }
 
 // POST /admin/auth/signup
 router.post("/admin/auth/signup", async (req, res) => {
+  let email = null;
   try {
     const { errors, normalized } = validateSignupPayload(req.body);
     if (Object.keys(errors).length > 0) {
       return res.status(422).json(buildValidationError(errors));
     }
+    email = normalized.email;
 
     const roleId = await getRoleIdByName(SIGNUP_ROLE);
     if (!roleId) return res.status(500).json({ message: "Role configuration missing in DB" });
 
-    if (isMongoConnected()) {
-      const existing = await AdminAccount.findOne({ email: normalized.email }).select({ public_id: 1 }).lean();
-      if (existing) {
-        auditLog({ action: "admin.signup", actor: null, target: normalized.email, outcome: "duplicate_email" });
-        return res.status(409).json({ message: "Email already registered" });
-      }
-      const password_hash = await bcrypt.hash(normalized.password, 12);
-      const admin = await AdminAccount.create({
-        public_id: await Counter.nextPublicId("admins"), email: normalized.email,
-        password_hash, full_name: normalized.full_name, role_id: roleId, role: SIGNUP_ROLE,
-      });
-      const permissions = admin.permission_names ?? [];
-      const token = jwt.sign(
-        { sub: String(admin.public_id), adminId: admin.public_id, role: SIGNUP_ROLE, roleId },
-        JWT_SECRET, { expiresIn: jwtTtl.ttl }
-      );
-      auditLog({ action: "admin.signup", actor: admin.public_id, target: admin.email, outcome: "created" });
-      return res.status(201).json({ token, admin: { id: admin.public_id, email: admin.email, full_name: admin.full_name, role: SIGNUP_ROLE, role_id: roleId, permissions } });
-    }
-
-    const existing = await pool.query("SELECT id FROM admins WHERE lower(email) = $1", [normalized.email]);
-    if (existing.rowCount > 0) {
+    const existing = await AdminAccount.findOne({ email: normalized.email }).select({ public_id: 1 }).lean();
+    if (existing) {
       auditLog({ action: "admin.signup", actor: null, target: normalized.email, outcome: "duplicate_email" });
       return res.status(409).json({ message: "Email already registered" });
     }
-
     const password_hash = await bcrypt.hash(normalized.password, 12);
-
-    const inserted = await pool.query(
-      `INSERT INTO admins (email, password_hash, full_name, role_id)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, email, full_name, role_id, created_at`,
-      [normalized.email, password_hash, normalized.full_name, roleId]
-    );
-
-    const admin = inserted.rows[0];
-
-    const permissions = await getAdminPermissions(admin.id);
-
-    const token = jwt.sign(
-      { sub: String(admin.id), adminId: admin.id, role: SIGNUP_ROLE, roleId: admin.role_id },
-      JWT_SECRET,
-      { expiresIn: jwtTtl.ttl }
-    );
-
-    auditLog({ action: "admin.signup", actor: admin.id, target: admin.email, outcome: "created" });
-
-    return res.status(201).json({
-      token,
-      admin: {
-        id: admin.id,
-        email: admin.email,
-        full_name: admin.full_name,
-        role: SIGNUP_ROLE,
-        role_id: admin.role_id,
-        permissions
-      }
+    const admin = await AdminAccount.create({
+      public_id: await Counter.nextPublicId("admins"), email: normalized.email,
+      password_hash, full_name: normalized.full_name, role_id: roleId, role: SIGNUP_ROLE,
     });
+    const permissions = admin.permission_names ?? [];
+    const token = jwt.sign(
+      { sub: String(admin.public_id), adminId: admin.public_id, role: SIGNUP_ROLE, roleId },
+      JWT_SECRET, { expiresIn: jwtTtl.ttl }
+    );
+    auditLog({ action: "admin.signup", actor: admin.public_id, target: admin.email, outcome: "created" });
+    return res.status(201).json({ token, admin: { id: admin.public_id, email: admin.email, full_name: admin.full_name, role: SIGNUP_ROLE, role_id: roleId, permissions } });
     } catch (e) {
-      if (e?.code === "23505") {
-        auditLog({ action: "admin.signup", actor: null, target: normalized.email, outcome: "duplicate_email" });
+      if (e?.code === 11000) {
+        auditLog({ action: "admin.signup", actor: null, target: email, outcome: "duplicate_email" });
         return res.status(409).json({ message: "Email already registered" });
       }
     console.error(e);
@@ -142,49 +97,12 @@ router.post("/admin/auth/login", async (req, res) => {
       return res.status(422).json(buildValidationError(errors));
     }
 
-    if (isMongoConnected()) {
-      const row = await AdminAccount.findOne({ email: normalized.email }).lean();
-      if (!row) {
-        logAdminLoginDebug({ submittedEmail: normalized.email, adminFound: false, status: null, compareResult: null });
-        auditLog({ action: "admin.login", actor: null, target: normalized.email, outcome: "invalid_credentials" });
-        return res.status(401).json({ message: "Invalid credentials" });
-      }
-      const ok = await bcrypt.compare(normalized.password, row.password_hash);
-      if (!ok) {
-        auditLog({ action: "admin.login", actor: row.public_id, target: normalized.email, outcome: "invalid_credentials" });
-        return res.status(401).json({ message: "Invalid credentials" });
-      }
-      const activeCheck = assertAccountActive(row);
-      if (!activeCheck.ok) {
-        auditLog({ action: "admin.login", actor: row.public_id, target: normalized.email, outcome: "deactivated" });
-        return res.status(activeCheck.statusCode).json({ message: activeCheck.message });
-      }
-      const permissions = row.permission_names ?? [];
-      const token = jwt.sign({ sub: String(row.public_id), adminId: row.public_id, role: row.role, roleId: row.role_id }, JWT_SECRET, { expiresIn: jwtTtl.ttl });
-      auditLog({ action: "admin.login", actor: row.public_id, target: row.email, outcome: "success" });
-      return res.json({ token, admin: { id: row.public_id, email: row.email, full_name: row.full_name, role: row.role, role_id: row.role_id, permissions } });
-    }
-
-    const result = await pool.query(
-      `SELECT a.id, a.email, a.full_name, a.password_hash, a.role_id, a.status, r.name AS role
-       FROM admins a
-       JOIN roles r ON r.id = a.role_id
-       WHERE lower(a.email) = $1`,
-      [normalized.email]
-    );
-
-    if (result.rowCount === 0) {
-      logAdminLoginDebug({
-        submittedEmail: normalized.email,
-        adminFound: false,
-        status: null,
-        compareResult: null
-      });
+    const row = await AdminAccount.findOne({ email: normalized.email }).lean();
+    if (!row) {
+      logAdminLoginDebug({ submittedEmail: normalized.email, adminFound: false, status: null, compareResult: null });
       auditLog({ action: "admin.login", actor: null, target: normalized.email, outcome: "invalid_credentials" });
       return res.status(401).json({ message: "Invalid credentials" });
     }
-
-    const row = result.rows[0];
     logAdminLoginDebug({
       submittedEmail: normalized.email,
       adminFound: true,
@@ -201,28 +119,28 @@ router.post("/admin/auth/login", async (req, res) => {
     });
 
     if (!ok) {
-      auditLog({ action: "admin.login", actor: row.id, target: normalized.email, outcome: "invalid_credentials" });
+      auditLog({ action: "admin.login", actor: row.public_id, target: normalized.email, outcome: "invalid_credentials" });
       return res.status(401).json({ message: "Invalid credentials" });
     }
     const activeCheck = assertAccountActive(row);
     if (!activeCheck.ok) {
-      auditLog({ action: "admin.login", actor: row.id, target: normalized.email, outcome: "deactivated" });
+      auditLog({ action: "admin.login", actor: row.public_id, target: normalized.email, outcome: "deactivated" });
       return res.status(activeCheck.statusCode).json({ message: activeCheck.message });
     }
 
-    const permissions = await getAdminPermissions(row.id);
+    const permissions = row.permission_names ?? [];
     const token = jwt.sign(
-      { sub: String(row.id), adminId: row.id, role: row.role, roleId: row.role_id },
+      { sub: String(row.public_id), adminId: row.public_id, role: row.role, roleId: row.role_id },
       JWT_SECRET,
       { expiresIn: jwtTtl.ttl }
     );
 
-    auditLog({ action: "admin.login", actor: row.id, target: row.email, outcome: "success" });
+    auditLog({ action: "admin.login", actor: row.public_id, target: row.email, outcome: "success" });
 
     return res.json({
       token,
       admin: {
-        id: row.id,
+        id: row.public_id,
         email: row.email,
         full_name: row.full_name,
         role: row.role,

@@ -1,12 +1,11 @@
 import express from "express";
+import mongoose from "mongoose";
 import { randomUUID } from "node:crypto";
-import { pool } from "../db.js";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
 import { requireAdminAuth } from "../middleware/adminAuth.js";
 import { notifyUserLifecycleEvent } from "../services/userNotifications.js";
 import { AdminNotification } from "../models/AdminNotification.js";
 import { Counter } from "../models/Counter.js";
-import { isMongoConnected } from "../mongo.js";
 import { UserProfile, AdminAccount, IncidentReport, IncidentEvidence } from "../models/Remaining.js";
 import { findProfileByUid } from "../services/userProfiles.js";
 
@@ -45,15 +44,7 @@ async function notifyAdminsAboutIncident({ incidentId, incidentType }) {
       : "incident";
   const message = `A new ${safeIncidentType} incident was reported.`;
 
-  const adminIds = isMongoConnected()
-    ? (await AdminAccount.find({ status: "active" }).select({ public_id: 1 }).lean()).map((row) => Number(row.public_id))
-    : (await pool.query(
-    `
-    SELECT id
-    FROM admins
-    WHERE status = 'active'
-    `
-  )).rows.map((row) => Number(row.id));
+  const adminIds = (await AdminAccount.find({ status: "active" }).select({ public_id: 1 }).lean()).map((row) => Number(row.public_id));
   if (adminIds.length === 0) {
     console.warn("[incident-routes] No active admin recipients for incident notification", {
       incidentId: Number(incidentId)
@@ -194,160 +185,25 @@ function canTransitionStatus(currentStatus, nextStatus) {
 }
 
 async function listIncidents({ status, limit, offset }) {
-  if (isMongoConnected()) {
-    const filter = status ? { status } : {};
-    const reports = await IncidentReport.find(filter).sort({ created_at: -1, public_id: -1 }).skip(offset).limit(limit).lean();
-    const evidence = await IncidentEvidence.find({ incident_report_id: { $in: reports.map((row) => row.public_id) } }).sort({ sort_order: 1, public_id: 1 }).lean();
-    const byIncident = new Map();
-    for (const item of evidence) { const list = byIncident.get(Number(item.incident_report_id)) || []; list.push({ id: item.public_id, sort_order: item.sort_order }); byIncident.set(Number(item.incident_report_id), list); }
-    return reports.map((row) => ({ ...row, id: row.public_id, images: byIncident.get(Number(row.public_id)) || [] }));
-  }
-  const values = [];
-  const where = [];
-
-  if (status) {
-    values.push(status);
-    where.push(`ir.status = $${values.length}`);
-  }
-
-  values.push(limit);
-  const limitParam = `$${values.length}`;
-  values.push(offset);
-  const offsetParam = `$${values.length}`;
-  const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-  const result = await pool.query(
-    `
-    SELECT
-      ir.id,
-      ir.user_id,
-      ir.incident_type,
-      ir.description,
-      ir.latitude,
-      ir.longitude,
-      ir.address,
-      ir.priority,
-      ir.status,
-      ir.created_at,
-      ir.updated_at,
-      ir.dispatched_at,
-      ir.resolved_at,
-      ir.assigned_department,
-      ir.resolution_notes,
-      COALESCE(img.images, '[]'::json) AS images
-    FROM incident_reports ir
-    LEFT JOIN LATERAL (
-      SELECT
-        json_agg(
-          json_build_object(
-            'id', iri.id,
-            'sort_order', iri.sort_order
-          )
-          ORDER BY iri.sort_order ASC, iri.id ASC
-        ) AS images
-      FROM incident_report_images iri
-      WHERE iri.incident_report_id = ir.id
-    ) img ON TRUE
-    ${whereClause}
-    ORDER BY ir.created_at DESC, ir.id DESC
-    LIMIT ${limitParam}
-    OFFSET ${offsetParam}
-    `,
-    values
-  );
-
-  return result.rows;
+  const filter = status ? { status } : {};
+  const reports = await IncidentReport.find(filter).sort({ created_at: -1, public_id: -1 }).skip(offset).limit(limit).lean();
+  const evidence = await IncidentEvidence.find({ incident_report_id: { $in: reports.map((row) => row.public_id) } }).sort({ sort_order: 1, public_id: 1 }).lean();
+  const byIncident = new Map();
+  for (const item of evidence) { const list = byIncident.get(Number(item.incident_report_id)) || []; list.push({ id: item.public_id, sort_order: item.sort_order }); byIncident.set(Number(item.incident_report_id), list); }
+  return reports.map((row) => ({ ...row, id: row.public_id, images: byIncident.get(Number(row.public_id)) || [] }));
 }
-
 async function getIncidentById(incidentId) {
-  if (isMongoConnected()) {
-    const row = await IncidentReport.findOne({ public_id: Number(incidentId) }).lean();
-    if (!row) return null;
-    const images = await IncidentEvidence.find({ incident_report_id: Number(incidentId) }).sort({ sort_order: 1, public_id: 1 }).select({ public_id: 1, sort_order: 1 }).lean();
-    return { ...row, id: row.public_id, images: images.map((item) => ({ id: item.public_id, sort_order: item.sort_order })) };
-  }
-  const result = await pool.query(
-    `
-    SELECT
-      ir.id,
-      ir.user_id,
-      ir.incident_type,
-      ir.description,
-      ir.latitude,
-      ir.longitude,
-      ir.address,
-      ir.priority,
-      ir.status,
-      ir.created_at,
-      ir.updated_at,
-      ir.dispatched_at,
-      ir.resolved_at,
-      ir.assigned_department,
-      ir.resolution_notes,
-      COALESCE(img.images, '[]'::json) AS images
-    FROM incident_reports ir
-    LEFT JOIN LATERAL (
-      SELECT
-        json_agg(
-          json_build_object(
-            'id', iri.id,
-            'sort_order', iri.sort_order
-          )
-          ORDER BY iri.sort_order ASC, iri.id ASC
-        ) AS images
-      FROM incident_report_images iri
-      WHERE iri.incident_report_id = ir.id
-    ) img ON TRUE
-    WHERE ir.id = $1
-    LIMIT 1
-    `,
-    [incidentId]
-  );
-
-  return result.rows[0] ?? null;
+  const row = await IncidentReport.findOne({ public_id: Number(incidentId) }).lean();
+  if (!row) return null;
+  const images = await IncidentEvidence.find({ incident_report_id: Number(incidentId) }).sort({ sort_order: 1, public_id: 1 }).select({ public_id: 1, sort_order: 1 }).lean();
+  return { ...row, id: row.public_id, images: images.map((item) => ({ id: item.public_id, sort_order: item.sort_order })) };
 }
-
 async function getIncidentImage({ incidentId, imageId, firebaseUid }) {
-  if (isMongoConnected()) {
-    const report = await IncidentReport.findOne({ public_id: Number(incidentId) }).lean();
-    if (!report) return null;
-    if (firebaseUid) {
-      const owner = await UserProfile.findOne({ public_id: report.user_id, firebase_uid: firebaseUid.trim() }).lean();
-      if (!owner) return null;
-    }
-    return IncidentEvidence.findOne({ public_id: Number(imageId), incident_report_id: Number(incidentId) }).select({ image_data: 1, content_type: 1 }).lean();
-  }
-  const values = [incidentId, imageId];
-  const userFilter =
-    typeof firebaseUid === "string" && firebaseUid.trim()
-      ? `AND EXISTS (
-          SELECT 1
-          FROM users u
-          WHERE u.id = ir.user_id
-            AND u.firebase_uid = $3
-        )`
-      : "";
-
-  if (userFilter) {
-    values.push(firebaseUid.trim());
-  }
-
-  const result = await pool.query(
-    `
-    SELECT iri.image_data, iri.content_type
-    FROM incident_report_images iri
-    JOIN incident_reports ir ON ir.id = iri.incident_report_id
-    WHERE ir.id = $1
-      AND iri.id = $2
-      ${userFilter}
-    LIMIT 1
-    `,
-    values
-  );
-
-  return result.rows[0] ?? null;
+  const report = await IncidentReport.findOne({ public_id: Number(incidentId) }).lean();
+  if (!report) return null;
+  if (firebaseUid && !(await UserProfile.exists({ public_id: report.user_id, firebase_uid: firebaseUid.trim() }))) return null;
+  return IncidentEvidence.findOne({ public_id: Number(imageId), incident_report_id: Number(incidentId) }).select({ image_data: 1, content_type: 1 }).lean();
 }
-
 function detectImageContentType(buffer) {
   if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
     return "image/jpeg";
@@ -482,7 +338,6 @@ router.patch(
   "/admin/incidents/:id",
   requireAdminAuth,
   async (req, res) => {
-    let client = null;
     try {
       const incidentId = parsePositiveInt(req.params?.id);
       if (!incidentId) {
@@ -574,7 +429,7 @@ router.patch(
         return res.status(400).json({ message: "No valid updates provided" });
       }
 
-      if (isMongoConnected()) {
+      {
         const current = await IncidentReport.findOne({ public_id: incidentId }).lean();
         if (!current) return res.status(404).json({ message: "Incident not found" });
         const effectiveStatus = nextStatus ?? current.status;
@@ -594,154 +449,9 @@ router.patch(
         return res.json(toIncidentDto(updated, { isAdminRoute: true }));
       }
 
-      client = await pool.connect();
-      await client.query("BEGIN");
-
-      const currentResult = await client.query(
-        `
-        SELECT
-          id,
-          user_id,
-          status,
-          assigned_department,
-          dispatched_at,
-          resolved_at
-        FROM incident_reports
-        WHERE id = $1
-        LIMIT 1
-        `,
-        [incidentId]
-      );
-
-      if (currentResult.rowCount === 0) {
-        await client.query("ROLLBACK");
-        return res.status(404).json({ message: "Incident not found" });
-      }
-
-      const current = currentResult.rows[0];
-      const effectiveStatus = nextStatus ?? current.status;
-      const shouldNotifySender =
-        nextStatus !== undefined &&
-        current.status !== effectiveStatus &&
-        ["dispatched", "in_progress", "resolved"].includes(effectiveStatus);
-      if (!shouldNotifySender) {
-        console.info("[incident-routes] sender notification skipped", {
-          ...trace,
-          currentStatus: current.status,
-          nextStatus: nextStatus ?? null,
-          effectiveStatus,
-          reason:
-            nextStatus === undefined
-              ? "status_unchanged_or_missing"
-              : current.status === effectiveStatus
-                ? "status_unchanged_or_missing"
-                : "non_milestone_status",
-        });
-      }
-      if (!canTransitionStatus(current.status, effectiveStatus)) {
-        await client.query("ROLLBACK");
-        return res.status(409).json({ message: "Invalid status transition" });
-      }
-
-      const values = [incidentId];
-      const setClauses = [];
-
-      if (nextIncidentType !== undefined) {
-        values.push(nextIncidentType);
-        setClauses.push(`incident_type = $${values.length}`);
-      }
-
-      if (nextStatus !== undefined) {
-        values.push(nextStatus);
-        setClauses.push(`status = $${values.length}`);
-      }
-
-      if (nextPriority !== undefined) {
-        values.push(nextPriority);
-        setClauses.push(`priority = $${values.length}`);
-      }
-
-      if (assignedDepartment !== undefined) {
-        values.push(assignedDepartment);
-        setClauses.push(`assigned_department = $${values.length}`);
-      }
-
-      if (resolutionNotes !== undefined) {
-        values.push(resolutionNotes);
-        setClauses.push(`resolution_notes = $${values.length}`);
-      }
-
-      if (effectiveStatus === "dispatched" && current.dispatched_at == null) {
-        setClauses.push("dispatched_at = NOW()");
-      }
-
-      if (effectiveStatus === "resolved" && current.resolved_at == null) {
-        setClauses.push("resolved_at = NOW()");
-      }
-
-      setClauses.push("updated_at = NOW()");
-
-      const updateResult = await client.query(
-        `
-        UPDATE incident_reports
-        SET ${setClauses.join(", ")}
-        WHERE id = $1
-        RETURNING id
-        `,
-        values
-      );
-
-      await client.query("COMMIT");
-      const updated = await getIncidentById(updateResult.rows[0].id);
-      if (shouldNotifySender) {
-        console.info("[incident-routes] sender notification dispatch queued", {
-          ...trace,
-          recipientUserId: Number(current.user_id ?? null),
-          status: effectiveStatus,
-          assignedDepartment: updated?.assigned_department ?? current.assigned_department ?? null,
-        });
-        notifyUserLifecycleEvent({
-          recipient_user_id: current.user_id,
-          entity_type: "incident",
-          entity_id: updateResult.rows[0].id,
-          status: effectiveStatus,
-          assigned_department: updated?.assigned_department ?? current.assigned_department ?? null,
-          trace: {
-            ...trace,
-            recipientUserId: Number(current.user_id ?? null),
-            notificationType: "incident_update",
-            status: effectiveStatus,
-          }
-        })
-          .then((result) => {
-            console.info("[incident-routes] sender notification result", {
-              ...trace,
-              recipientUserId: Number(current.user_id ?? null),
-              status: effectiveStatus,
-              notificationId: result?.notification?.id ?? null,
-              skipped: result?.skipped ?? false,
-              reason: result?.reason ?? result?.push?.reason ?? result?.push?.error ?? null,
-              push: result?.push ?? null,
-            });
-          })
-          .catch((notifyErr) => {
-            console.error("sender incident notification failed:", notifyErr?.message || notifyErr, {
-              ...trace,
-              recipientUserId: Number(current.user_id ?? null),
-            });
-          });
-      }
-      return res.json(toIncidentDto(updated, { isAdminRoute: true }));
     } catch (err) {
-      try {
-        if (client) await client.query("ROLLBACK");
-      } catch (rollbackErr) {
-        console.error("PATCH /admin/incidents/:id rollback error:", rollbackErr);
-      }
       console.error("PATCH /admin/incidents/:id error:", err);
       return res.status(500).json({ message: "Server error" });
-    } finally {
-      client?.release();
     }
   }
 );
@@ -839,17 +549,25 @@ router.post("/incidents", requireAppAuth, async (req, res) => {
     return res.status(400).json({ message: err?.message || "Invalid image payload" });
   }
 
-  if (isMongoConnected()) {
+  {
     try {
       const profile = await findProfileByUid(uid);
       if (!profile) return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
       const incidentId = await Counter.nextPublicId("incident_reports");
       const now = new Date();
-      const incident = await IncidentReport.create({ public_id: incidentId, user_id: Number(profile.public_id), incident_type: incident_type.trim(), description: description.trim(), latitude: latitude ?? undefined, longitude: longitude ?? undefined, address: address ?? undefined, status: "pending", priority: "medium", created_at: now, updated_at: now });
+      const evidenceDocs = [];
       for (let i = 0; i < parsedImages.length; i++) {
         const { imageData, contentType } = parsedImages[i];
-        await IncidentEvidence.create({ public_id: await Counter.nextPublicId("incident_evidence"), incident_report_id: incidentId, image_data: imageData, content_type: contentType, sort_order: i, created_at: now });
+        evidenceDocs.push({ public_id: await Counter.nextPublicId("incident_evidence"), incident_report_id: incidentId, image_data: imageData, content_type: contentType, sort_order: i, created_at: now });
       }
+      const session = await mongoose.startSession();
+      let incident;
+      try {
+        await session.withTransaction(async () => {
+          [incident] = await IncidentReport.create([{ public_id: incidentId, user_id: Number(profile.public_id), incident_type: incident_type.trim(), description: description.trim(), latitude: latitude ?? undefined, longitude: longitude ?? undefined, address: address ?? undefined, status: "pending", priority: "medium", created_at: now, updated_at: now }], { session });
+          if (evidenceDocs.length) await IncidentEvidence.create(evidenceDocs, { session });
+        });
+      } finally { await session.endSession(); }
       await notifyAdminsAboutIncident({ incidentId, incidentType: incident.incident_type }).catch(() => {});
       return res.status(201).json({ id: incident.public_id, user_id: incident.user_id, incident_type: incident.incident_type, description: incident.description, latitude: incident.latitude ?? null, longitude: incident.longitude ?? null, address: incident.address ?? null, status: incident.status, created_at: incident.created_at, images_count: parsedImages.length });
     } catch (err) {
@@ -858,76 +576,6 @@ router.post("/incidents", requireAppAuth, async (req, res) => {
     }
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    // Map Firebase uid to the legacy numeric user id.
-    const userRes = await client.query(
-      "SELECT id FROM users WHERE firebase_uid = $1",
-      [uid]
-    );
-
-    if (userRes.rowCount === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "User not found. Call /me/bootstrap first." });
-    }
-
-    const userId = userRes.rows[0].id;
-
-    const insertRes = await client.query(
-      `INSERT INTO incident_reports (user_id, incident_type, description, latitude, longitude, address)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, user_id, incident_type, description, latitude, longitude, address, status, created_at`,
-      [
-        userId,
-        incident_type.trim(),
-        description.trim(),
-        latitude ?? null,
-        longitude ?? null,
-        address ?? null
-      ]
-    );
-
-    const incidentReport = insertRes.rows[0];
-    for (let i = 0; i < parsedImages.length; i++) {
-      const { imageData, contentType } = parsedImages[i];
-      await client.query(
-        `INSERT INTO incident_report_images (incident_report_id, image_data, content_type, sort_order)
-         VALUES ($1, $2, $3, $4)`,
-        [incidentReport.id, imageData, contentType, i]
-      );
-    }
-
-    await client.query("COMMIT");
-    logDebug("create.completed", {
-      incidentId: Number(incidentReport.id),
-      userId: Number(userId),
-      incidentType: incidentReport.incident_type
-    });
-    try {
-      await notifyAdminsAboutIncident({
-        incidentId: incidentReport.id,
-        incidentType: incidentReport.incident_type,
-      });
-    } catch (notifyErr) {
-      // Best-effort notification fan-out should not block incident creation flow.
-      console.error("Incident admin notification insert failed:", notifyErr?.message || notifyErr, {
-        code: notifyErr?.code,
-        incidentId: Number(incidentReport.id)
-      });
-    }
-    return res.status(201).json({
-      ...incidentReport,
-      images_count: parsedImages.length
-    });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("Create incident failed:", err?.message || err);
-    return res.status(500).json({ message: "Failed to create incident report" });
-  } finally {
-    client.release();
-  }
 });
 
 export default router;

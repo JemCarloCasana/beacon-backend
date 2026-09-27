@@ -4,14 +4,16 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import jwt from "jsonwebtoken";
 import { getMessaging } from "firebase-admin/messaging";
-import router from "../src/routes/broadcastRoutes.js";
-import { pool } from "../src/db.js";
 import { Broadcast } from "../src/models/Broadcast.js";
 import { BroadcastDelivery } from "../src/models/BroadcastDelivery.js";
 import { Counter } from "../src/models/Counter.js";
+import { AdminAccount, Device, UserProfile } from "../src/models/Remaining.js";
 import { sendBroadcastPush } from "../src/services/fcm.js";
 import { connectMongo } from "../src/mongo.js";
 import { upsertMany, advanceCounter, compareImportedDocuments } from "./mongoImportHelpers.js";
+
+process.env.ADMIN_JWT_SECRET ||= "phase-regression-test-secret";
+const router = (await import("../src/routes/broadcastRoutes.js")).default;
 
 const route = (method, path = "/admin/broadcasts/:id") => router.stack.find(
   (entry) => entry.route?.path === path && entry.route.methods[method]
@@ -20,7 +22,7 @@ const response = () => ({ statusCode: 200, status(code) { this.statusCode = code
 const draft = { public_id: 7, title: "Alert", body: "Details", severity: "warning", audience_type: "all", created_by_admin_id: 1, sent_at: null };
 
 test("ack passes through real Mongoose pipeline handling", async (t) => {
-  t.mock.method(pool, "query", async () => ({ rows: [{ id: 42 }], rowCount: 1 }));
+  t.mock.method(UserProfile, "findOne", async () => ({ public_id: 42 }));
   t.mock.method(Broadcast, "findOne", () => ({ lean: async () => draft }));
   const timestamp = new Date();
   t.mock.method(BroadcastDelivery.collection, "findOneAndUpdate", async (filter, update) => {
@@ -36,7 +38,7 @@ test("ack passes through real Mongoose pipeline handling", async (t) => {
 
 test("delete enforces current database role through the middleware chain", async (t) => {
   let role = "personnel", permissions = ["manage_broadcasts"], deletes = 0;
-  t.mock.method(pool, "query", async (sql) => ({ rowCount: 1, rows: [sql.includes("AS permissions") ? { permissions } : sql.includes("AS role") ? { role } : { id: 2, status: "active" }] }));
+  t.mock.method(AdminAccount, "findOne", () => ({ select: (projection) => ({ lean: async () => projection.permission_names ? { permission_names: permissions } : projection.role ? { role } : { public_id: 2, status: "active" } }) }));
   t.mock.method(Broadcast, "findOneAndDelete", () => ({ lean: async () => { deletes++; return draft; } }));
   t.mock.method(BroadcastDelivery, "deleteMany", async () => ({ deletedCount: 0 }));
   const token = jwt.sign({ adminId: 2, role: "admin" }, process.env.ADMIN_JWT_SECRET);
@@ -98,10 +100,8 @@ test("oversized create/edit fields produce 400 using actual schema validators", 
 test("push batches 0/1/500/501 tokens, continues on rejection, preserves cleanup results", async (t) => {
   t.mock.method(BroadcastDelivery, "find", () => ({ lean: async () => [{ recipient_user_id: 1 }] }));
   let size = 0, rejectFirst = false, cleanupFails = false, invalidToken = false, batches = [], removed;
-  t.mock.method(pool, "query", async (sql, args) => {
-    if (sql.startsWith("DELETE")) { removed = args[0]; if (cleanupFails) throw new Error("private detail"); return {}; }
-    return { rows: Array.from({ length: size }, (_, i) => ({ fcm_token: `token${i}` })) };
-  });
+  t.mock.method(Device, "find", () => ({ select: () => ({ lean: async () => Array.from({ length: size }, (_, i) => ({ fcm_token: `token${i}` })) }) }));
+  t.mock.method(Device, "updateMany", async (filter) => { removed = filter.fcm_token.$in; if (cleanupFails) throw new Error("private detail"); return {}; });
   t.mock.method(getMessaging(), "sendEachForMulticast", async ({ tokens }) => {
     batches.push(tokens.length);
     if (rejectFirst && batches.length === 1) throw new Error("private detail");

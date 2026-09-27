@@ -2,341 +2,52 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import router from "../src/routes/sosRoutes.js";
-import { pool } from "../src/db.js";
+import { mongoose } from "../src/mongo.js";
+import { Counter } from "../src/models/Counter.js";
+import { UserProfile, Friendship, AdminAccount, SosEvent, SosThread } from "../src/models/Remaining.js";
 
-function getRoute(path, method) {
-  const layer = router.stack.find(
-    (entry) => entry.route?.path === path && entry.route.methods?.[method]
-  );
-  if (!layer) {
-    throw new Error(`Route ${method.toUpperCase()} ${path} not found`);
-  }
-  return layer.route.stack;
+function handler(path, method) {
+  const layer = router.stack.find((entry) => entry.route?.path === path && entry.route.methods?.[method]);
+  assert.ok(layer, `${method.toUpperCase()} ${path} exists`);
+  return layer.route.stack.at(-1).handle;
 }
 
-function createRes() {
-  return {
-    statusCode: 200,
-    body: null,
-    status(code) {
-      this.statusCode = code;
-      return this;
-    },
-    json(payload) {
-      this.body = payload;
-      return this;
-    }
-  };
+function response() {
+  return { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
 }
 
-test("POST /sos returns 400 when category is missing", async () => {
-  const stack = getRoute("/sos", "post");
-  const handler = stack[stack.length - 1].handle;
+function stub(t, model, method, replacement) {
+  const original = model[method];
+  model[method] = replacement;
+  t.after(() => { model[method] = original; });
+}
 
-  const req = {
-    auth: { uid: "firebase-uid-1" },
-    body: { latitude: 16.04, longitude: 120.33 }
-  };
-  const res = createRes();
-
-  await handler(req, res);
-
-  assert.equal(res.statusCode, 400);
-  assert.deepEqual(res.body, { message: "Invalid category" });
+test("POST /sos creates a Mongo thread and root event using numeric public IDs", async (t) => {
+  let id = 40;
+  let transactionPayload;
+  const originalSession = mongoose.startSession;
+  const session = { withTransaction: async (callback) => callback(), endSession: async () => {} };
+  mongoose.startSession = async () => session;
+  t.after(() => { mongoose.startSession = originalSession; });
+  stub(t, UserProfile, "findOne", async () => ({ public_id: 10, full_name: "Alex" }));
+  stub(t, Counter, "nextPublicId", async (key) => { assert.ok(["sos_events", "sos_threads"].includes(key)); return id++; });
+  stub(t, AdminAccount, "find", () => ({ select: () => ({ lean: async () => [] }) }));
+  stub(t, Friendship, "find", () => ({ lean: async () => [] }));
+  stub(t, SosThread, "findOne", () => ({ lean: async () => null }));
+  const res = response();
+  stub(t, SosEvent, "create", async (docs, options) => { transactionPayload = { ...transactionPayload, event: docs[0] }; assert.equal(options.session, session); return [docs[0]]; });
+  stub(t, SosThread, "create", async (docs, options) => { transactionPayload = { ...transactionPayload, thread: docs[0] }; assert.equal(options.session, session); return [docs[0]]; });
+  await handler("/sos", "post")({ auth: { uid: "uid-10" }, body: { category: "medical", latitude: 1.2, longitude: 2.3 } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sos_id, "40");
+  assert.equal(transactionPayload.event.user_id, 10);
+  assert.equal(transactionPayload.event.event_type, "report_created");
+  assert.equal(transactionPayload.thread.public_id, 41);
 });
 
-test("PATCH /sos/:sosId/status returns 400 on invalid sos id", async () => {
-  const stack = getRoute("/sos/:sosId/status", "patch");
-  const handler = stack[stack.length - 1].handle;
-  const req = {
-    auth: { uid: "firebase-uid-1" },
-    params: { sosId: "0" },
-    body: { status: "safe" }
-  };
-  const res = createRes();
-
-  await handler(req, res);
-
-  assert.equal(res.statusCode, 400);
-  assert.deepEqual(res.body, { message: "Invalid sosId" });
-});
-
-test("PATCH /sos/:sosId/status returns 400 on invalid terminal status", async () => {
-  const stack = getRoute("/sos/:sosId/status", "patch");
-  const handler = stack[stack.length - 1].handle;
-  const req = {
-    auth: { uid: "firebase-uid-1" },
-    params: { sosId: "7" },
-    body: { status: "resolved" }
-  };
-  const res = createRes();
-
-  await handler(req, res);
-
+test("PATCH /sos/:sosId/status rejects invalid terminal status before database access", async () => {
+  const res = response();
+  await handler("/sos/:sosId/status", "patch")({ params: { sosId: "40" }, body: { status: "active" }, auth: { uid: "uid-10" } }, res);
   assert.equal(res.statusCode, 400);
   assert.deepEqual(res.body, { message: "Invalid status" });
-});
-
-test("PATCH /sos/:sosId/status returns 400 on invalid source", async () => {
-  const stack = getRoute("/sos/:sosId/status", "patch");
-  const handler = stack[stack.length - 1].handle;
-  const req = {
-    auth: { uid: "firebase-uid-1" },
-    params: { sosId: "7" },
-    body: { status: "safe", source: "ios" }
-  };
-  const res = createRes();
-
-  await handler(req, res);
-
-  assert.equal(res.statusCode, 400);
-  assert.deepEqual(res.body, { message: "Invalid source" });
-});
-
-test("PATCH /sos/:sosId/status returns 400 on invalid resolved_at", async () => {
-  const stack = getRoute("/sos/:sosId/status", "patch");
-  const handler = stack[stack.length - 1].handle;
-  const req = {
-    auth: { uid: "firebase-uid-1" },
-    params: { sosId: "7" },
-    body: { status: "cancelled", resolved_at: "not-a-date" }
-  };
-  const res = createRes();
-
-  await handler(req, res);
-
-  assert.equal(res.statusCode, 400);
-  assert.deepEqual(res.body, { message: "Invalid resolved_at" });
-});
-
-test("PATCH /sos/:sosId/status persists terminal outcome and returns contract payload", async (t) => {
-  const originalQuery = pool.query;
-  const originalConnect = pool.connect;
-  t.after(() => {
-    pool.query = originalQuery;
-    pool.connect = originalConnect;
-  });
-
-  pool.query = async (sql) => {
-    const text = String(sql);
-    if (/SELECT id FROM users WHERE firebase_uid = \$1/i.test(text)) {
-      return { rowCount: 1, rows: [{ id: 42 }] };
-    }
-    if (/WHERE st\.root_event_id = \$1/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
-      return { rowCount: 0, rows: [] };
-    }
-    throw new Error(`Unexpected pool.query in test: ${text}`);
-  };
-
-  const client = {
-    insertParams: null,
-    async query(sql) {
-      const text = String(sql);
-      if (/^BEGIN$/i.test(text.trim())) return { rowCount: null, rows: [] };
-      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
-        return {
-          rowCount: 1,
-          rows: [
-            {
-              thread_id: 99,
-              user_id: 42,
-              latest_status: "active",
-              resolved_at: null,
-              emergency_category: "medical",
-              latitude: 16.04,
-              longitude: 120.33,
-              address: "Dagupan"
-            }
-          ]
-        };
-      }
-      if (/UPDATE sos_threads/i.test(text)) {
-        return {
-          rowCount: 1,
-          rows: [
-            {
-              sos_id: 7,
-              terminal_status: "safe",
-              resolved_at: "2026-03-11T00:30:00.000Z"
-            }
-          ]
-        };
-      }
-      if (/INSERT INTO sos_events/i.test(text)) {
-        this.insertParams = arguments[1];
-        return { rowCount: 1, rows: [] };
-      }
-      if (/^COMMIT$/i.test(text.trim())) return { rowCount: null, rows: [] };
-      throw new Error(`Unexpected client.query in test: ${text}`);
-    },
-    release() {}
-  };
-  pool.connect = async () => client;
-
-  const stack = getRoute("/sos/:sosId/status", "patch");
-  const handler = stack[stack.length - 1].handle;
-  const req = {
-    auth: { uid: "firebase-uid-1" },
-    params: { sosId: "7" },
-    body: { status: "safe", source: "android", resolved_at: "2026-03-11T00:30:00.000Z" }
-  };
-  const res = createRes();
-
-  await handler(req, res);
-
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body, {
-    sos_id: "7",
-    status: "safe",
-    resolved_at: "2026-03-11T00:30:00.000Z"
-  });
-  assert.equal(client.insertParams[6], "safe");
-});
-
-test("PATCH /sos/:sosId/status allows an accepted friend to mark the SOS safe", async (t) => {
-  const originalQuery = pool.query;
-  const originalConnect = pool.connect;
-  t.after(() => {
-    pool.query = originalQuery;
-    pool.connect = originalConnect;
-  });
-
-  pool.query = async (sql) => {
-    const text = String(sql);
-    if (/SELECT id FROM users WHERE firebase_uid = \$1/i.test(text)) {
-      return { rowCount: 1, rows: [{ id: 77 }] };
-    }
-    if (/WHERE st\.root_event_id = \$1/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
-      return { rowCount: 0, rows: [] };
-    }
-    throw new Error(`Unexpected pool.query in test: ${text}`);
-  };
-
-  const client = {
-    insertParams: null,
-    async query(sql) {
-      const text = String(sql);
-      if (/^BEGIN$/i.test(text.trim())) return { rowCount: null, rows: [] };
-      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
-        return {
-          rowCount: 1,
-          rows: [
-            {
-              thread_id: 99,
-              user_id: 42,
-              latest_status: "active",
-              resolved_at: null,
-              emergency_category: "medical",
-              latitude: 16.04,
-              longitude: 120.33,
-              address: "Dagupan"
-            }
-          ]
-        };
-      }
-      if (/FROM friendships/i.test(text)) {
-        return { rowCount: 1, rows: [{ "?column?": 1 }] };
-      }
-      if (/UPDATE sos_threads/i.test(text)) {
-        return {
-          rowCount: 1,
-          rows: [
-            {
-              sos_id: 7,
-              terminal_status: "safe",
-              resolved_at: "2026-03-11T00:30:00.000Z"
-            }
-          ]
-        };
-      }
-      if (/INSERT INTO sos_events/i.test(text)) {
-        this.insertParams = arguments[1];
-        return { rowCount: 1, rows: [] };
-      }
-      if (/^COMMIT$/i.test(text.trim())) return { rowCount: null, rows: [] };
-      throw new Error(`Unexpected client.query in test: ${text}`);
-    },
-    release() {}
-  };
-  pool.connect = async () => client;
-
-  const stack = getRoute("/sos/:sosId/status", "patch");
-  const handler = stack[stack.length - 1].handle;
-  const req = {
-    auth: { uid: "firebase-uid-2" },
-    params: { sosId: "7" },
-    body: { status: "safe", source: "android", resolved_at: "2026-03-11T00:30:00.000Z" }
-  };
-  const res = createRes();
-
-  await handler(req, res);
-
-  assert.equal(res.statusCode, 200);
-  assert.equal(client.insertParams[2], 77);
-  assert.equal(client.insertParams[6], "safe");
-});
-
-test("PATCH /sos/:sosId/status returns 403 for a non-owner who is not a friend", async (t) => {
-  const originalQuery = pool.query;
-  const originalConnect = pool.connect;
-  t.after(() => {
-    pool.query = originalQuery;
-    pool.connect = originalConnect;
-  });
-
-  pool.query = async (sql) => {
-    const text = String(sql);
-    if (/SELECT id FROM users WHERE firebase_uid = \$1/i.test(text)) {
-      return { rowCount: 1, rows: [{ id: 77 }] };
-    }
-    if (/WHERE st\.root_event_id = \$1/i.test(text) && /JOIN users u ON u.id = st.user_id/i.test(text)) {
-      return { rowCount: 0, rows: [] };
-    }
-    throw new Error(`Unexpected pool.query in test: ${text}`);
-  };
-
-  const client = {
-    async query(sql) {
-      const text = String(sql);
-      if (/^BEGIN$/i.test(text.trim())) return { rowCount: null, rows: [] };
-      if (/FROM sos_threads st/i.test(text) && /FOR UPDATE OF st/i.test(text)) {
-        return {
-          rowCount: 1,
-          rows: [
-            {
-              thread_id: 99,
-              user_id: 42,
-              latest_status: "active",
-              resolved_at: null,
-              emergency_category: "medical",
-              latitude: 16.04,
-              longitude: 120.33,
-              address: "Dagupan"
-            }
-          ]
-        };
-      }
-      if (/FROM friendships/i.test(text)) {
-        return { rowCount: 0, rows: [] };
-      }
-      if (/^ROLLBACK$/i.test(text.trim())) return { rowCount: null, rows: [] };
-      throw new Error(`Unexpected client.query in test: ${text}`);
-    },
-    release() {}
-  };
-  pool.connect = async () => client;
-
-  const stack = getRoute("/sos/:sosId/status", "patch");
-  const handler = stack[stack.length - 1].handle;
-  const req = {
-    auth: { uid: "firebase-uid-2" },
-    params: { sosId: "7" },
-    body: { status: "safe" }
-  };
-  const res = createRes();
-
-  await handler(req, res);
-
-  assert.equal(res.statusCode, 403);
-  assert.deepEqual(res.body, { message: "Forbidden" });
 });

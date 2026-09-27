@@ -4,13 +4,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
-import { pool } from "../src/db.js";
 import { Broadcast } from "../src/models/Broadcast.js";
 import { BroadcastDelivery } from "../src/models/BroadcastDelivery.js";
 import { AdminNotification } from "../src/models/AdminNotification.js";
 import { UserNotification } from "../src/models/UserNotification.js";
 import { ReportRun } from "../src/models/ReportRun.js";
 import { Counter } from "../src/models/Counter.js";
+import { EmergencyContact, UserProfile } from "../src/models/Remaining.js";
 import { sendBroadcastByPublicId } from "../src/services/broadcastSend.js";
 import { upsertMany, advanceCounter, compareImportedDocuments } from "./mongoImportHelpers.js";
 
@@ -27,11 +27,14 @@ test("isolated Atlas migration and transaction checks", { skip: process.env.BEAC
     assert.equal((await mongoose.connection.db.listCollections().toArray()).length, 0);
     owned = true;
     console.log(`Test database: ${dbName}`);
-    for (const model of [Broadcast, BroadcastDelivery, AdminNotification, UserNotification, ReportRun, Counter]) {
+    for (const model of [Broadcast, BroadcastDelivery, AdminNotification, UserNotification, ReportRun, Counter, UserProfile, EmergencyContact]) {
       await model.createCollection();
       await model.createIndexes();
     }
-    t.mock.method(pool, "query", async () => ({ rows: [{ id: 1 }, { id: 2 }], rowCount: 2 }));
+    await UserProfile.create([
+      { public_id: 1, firebase_uid: "integration-user-1", full_name: "Integration One", email: "integration-one@example.test", beacon_code: "BCN-TEST01" },
+      { public_id: 2, firebase_uid: "integration-user-2", full_name: "Integration Two", email: "integration-two@example.test", beacon_code: "BCN-TEST02" },
+    ]);
     const draft = { public_id: 7, title: "Synthetic test", body: "Synthetic test", severity: "warning", audience_type: "all", created_by_admin_id: 1, sent_at: null, created_at: new Date(0), updated_at: new Date(0) };
 
     await t.test("import reruns preserve fields and enforce unique indexes", async () => {
@@ -71,12 +74,47 @@ test("isolated Atlas migration and transaction checks", { skip: process.env.BEAC
       assert.equal((await Broadcast.findOne({ public_id: 8 }).lean()).sent_at, null);
       assert.equal(await BroadcastDelivery.countDocuments({ broadcast_public_id: 8 }), 1);
     });
+
+    await t.test("localhost HTTP routes use Mongo-backed profiles and contacts", async () => {
+      const { app } = await import("../server.js");
+      const { setVerifyIdTokenForTests } = await import("../src/middleware/requireAuth.js");
+      setVerifyIdTokenForTests(async (token) => {
+        assert.equal(token, "isolated-mongo-smoke-token");
+        return { uid: "integration-user-1", email: "integration-one@example.test" };
+      });
+      const server = await new Promise((resolve) => {
+        const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
+      });
+      const baseUrl = `http://127.0.0.1:${server.address().port}`;
+      const headers = {
+        Authorization: "Bearer isolated-mongo-smoke-token",
+        "Content-Type": "application/json",
+      };
+      try {
+        const profile = await fetch(`${baseUrl}/me`, { headers });
+        assert.equal(profile.status, 200);
+        assert.equal((await profile.json()).id, 1);
+
+        const contact = await fetch(`${baseUrl}/contacts`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ contact_name: "Synthetic Contact", phone_number: "09171234567" }),
+        });
+        assert.equal(contact.status, 201);
+        assert.deepEqual(
+          (({ id, contact_name, phone_number, relation, is_primary }) => ({ id, contact_name, phone_number, relation, is_primary }))(await contact.json()),
+          { id: 1, contact_name: "Synthetic Contact", phone_number: "+639171234567", relation: null, is_primary: false },
+        );
+      } finally {
+        setVerifyIdTokenForTests(null);
+        await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      }
+    });
   } finally {
     if (owned && mongoose.connection.name === dbName && /^beacon_fix_[a-f0-9]{24}$/.test(dbName)) {
       await mongoose.connection.db.dropDatabase();
       console.log("Isolated test database removed");
     }
     await mongoose.disconnect();
-    await pool.end();
   }
 });

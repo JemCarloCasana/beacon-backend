@@ -13,8 +13,7 @@
     "start": "node server.js",
     "start:prod": "NODE_ENV=production node server.js",
     "hash:admin-password": "node scripts/generateBcryptHash.js",
-    "mongo:preflight": "node scripts/mongo-preflight.js",
-    "test": "node test/remainingModels.test.js && node test/adminAuthRoutes.contract.test.js && node test/meRoutes.patch.test.js && node test/meRoutes.bootstrap.test.js && node test/adminUsers.patch.test.js && node test/adminAdmins.patch.test.js && node test/broadcastRoutes.auth.test.js && node test/broadcastRoutes.create.test.js && node test/requireAuth.middleware.test.js && node test/friendRoutes.test.js && node test/adminSosRoutes.liveops.test.js && node test/incidentRoutes.admin.test.js && node test/sosRoutes.test.js && node test/adminReportsRoutes.test.js && node test/userNotifications.test.js && node test/phase1-5.regression.test.js && node test/security.http.test.js"
+    "test": "node test/sosAtomicity.test.js && node test/incidentAtomicity.test.js && node test/remainingModels.test.js && node test/contactDeviceRoutes.mongo.test.js && node test/adminAuthRoutes.contract.test.js && node test/meRoutes.patch.test.js && node test/meRoutes.bootstrap.test.js && node test/adminUsers.patch.test.js && node test/adminAdmins.patch.test.js && node test/broadcastRoutes.auth.test.js && node test/broadcastRoutes.create.test.js && node test/requireAuth.middleware.test.js && node test/friendRoutes.test.js && node test/adminSosRoutes.liveops.test.js && node test/incidentRoutes.admin.test.js && node test/sosRoutes.test.js && node test/adminReportsRoutes.test.js && node test/userNotifications.test.js && node test/phase1-5.regression.test.js && node test/security.http.test.js"
   },
   "keywords": [
     "beacon",
@@ -31,6 +30,7 @@
     "firebase-admin": "^13.10.0",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
+    "mongodb": "^7.6.0",
     "mongoose": "^9.10.1",
     "morgan": "^1.10.1"
   }
