@@ -1,6 +1,6 @@
 import express from "express";
 import { randomUUID } from "node:crypto";
-import { requireAdminAuth, requirePermission } from "../middleware/adminAuth.js";
+import { requireAdminAuth, requirePermission, isAdminSessionValid } from "../middleware/adminAuth.js";
 import {
   appendThreadStatusEvent,
   getThreadStateAnyStatus,
@@ -16,7 +16,8 @@ import {
   replaySince,
   subscribeSse,
   writeHeartbeat,
-  writeSnapshotToStream
+  writeSnapshotToStream,
+  checkSseAccess
 } from "../services/sosLiveOps.js";
 import { notifySosFriendsTerminalEvent, notifyUserLifecycleEvent } from "../services/userNotifications.js";
 import { SosRecord } from "../models/Reduced.js";
@@ -134,11 +135,11 @@ router.get("/admin/sos/live/stream", requireAdminAuth, requirePermission("manage
   }
 
   openSseStream(res);
-  const unsubscribe = subscribeSse(res);
+  const unsubscribe = subscribeSse(res, () => isAdminSessionValid(req.admin, "manage_sos"));
 
   const lastEventId = Number(req.get("Last-Event-ID"));
   if (lastEventId) {
-    const replayResult = replaySince(lastEventId, res);
+    const replayResult = await replaySince(lastEventId, res);
     if (replayResult.missed) {
       console.warn("SSE replay miss for /admin/sos/live/stream", { lastEventId });
     }
@@ -146,14 +147,15 @@ router.get("/admin/sos/live/stream", requireAdminAuth, requirePermission("manage
 
   try {
     const snapshot = await listLiveThreads({ status: "open", limit: 500, cursor: null });
-    writeSnapshotToStream(res, snapshot.rows);
+    await writeSnapshotToStream(res, snapshot.rows);
   } catch (err) {
     console.error("Initial SOS snapshot error:", err);
   }
+  if (!await checkSseAccess(res)) { unsubscribe(); return; }
 
-  const heartbeatTimer = setInterval(() => {
+  const heartbeatTimer = setInterval(async () => {
     try {
-      writeHeartbeat(res);
+      await writeHeartbeat(res);
     } catch {
       clearInterval(heartbeatTimer);
       clearInterval(snapshotTimer);
@@ -164,13 +166,13 @@ router.get("/admin/sos/live/stream", requireAdminAuth, requirePermission("manage
   const snapshotTimer = setInterval(async () => {
     try {
       const snapshot = await listLiveThreads({ status: "open", limit: 500, cursor: null });
-      writeSnapshotToStream(res, snapshot.rows);
+      await writeSnapshotToStream(res, snapshot.rows);
     } catch (err) {
       console.error("Periodic SOS snapshot error:", err);
     }
   }, 30_000);
 
-  req.on("close", () => {
+  res.on("close", () => {
     clearInterval(heartbeatTimer);
     clearInterval(snapshotTimer);
     unsubscribe();

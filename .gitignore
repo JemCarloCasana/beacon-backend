@@ -2,3 +2,8 @@ node_modules
 .env
 serviceAccountKey.json
 1.json
+*firebase-adminsdk*.json
+firebase-debug.log
+firestore-debug.log
+.security-*.log
+.security-*.mjs

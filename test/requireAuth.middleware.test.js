@@ -57,19 +57,20 @@ test("requireAuth returns 401 for malformed and expired tokens", async () => {
   setVerifyIdTokenForTests(null);
 });
 
-test("requireAppAuth bootstraps a first-time profile using the token name", async (t) => {
-  let created;
-  await runAppAuth(t, { uid: "uid-app-1", email: "app@example.com", name: "App User" }, null, (values) => { created = values; });
-  assert.equal(created.firebase_uid, "uid-app-1");
-  assert.equal(created.full_name, "App User");
-  assert.equal(created.email, "app@example.com");
-  assert.equal(created.public_id, undefined);
-});
-
-test("requireAppAuth uses the email-derived name for a placeholder token name", async (t) => {
-  let created;
-  await runAppAuth(t, { uid: "uid-app-2", email: "jane.doe@example.com", name: "User 12345" }, null, (values) => { created = values; });
-  assert.equal(created.full_name, "jane doe");
+test("requireAppAuth requires explicit profile setup instead of creating a profile from token claims", async (t) => {
+  let creations = 0;
+  stub(t, UserProfile, "findOne", async () => null);
+  stub(t, UserProfile, "create", async () => { creations++; throw new Error("Implicit creation is forbidden"); });
+  setVerifyIdTokenForTests(async () => ({ uid: "uid-app-1", email: "app@example.com", name: "App User" }));
+  t.after(() => setVerifyIdTokenForTests(null));
+  const res = response();
+  let nextCalled = false;
+  await requireAppAuth({ headers: { authorization: "Bearer valid-token" } }, res, () => { nextCalled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.code, "PROFILE_SETUP_REQUIRED");
+  assert.equal(nextCalled, false);
+  assert.equal(creations, 0);
 });
 
 test("requireAppAuth preserves an existing real name when the token name is a placeholder", async (t) => {

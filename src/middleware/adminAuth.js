@@ -17,8 +17,8 @@ export function assertAccountActive(account) {
 export async function getAdminAuthAccount(adminId) {
   const objectId = parseObjectId(adminId);
   if (!objectId) return null;
-  const account = await AdminRecord.findOne({ _id: objectId, record_type: "account" }).select({ _id: 1, status: 1 }).lean();
-  return account ? { id: account._id.toString(), status: account.status } : null;
+  const account = await AdminRecord.findOne({ _id: objectId, record_type: "account" }).select({ _id: 1, status: 1, token_version: 1 }).lean();
+  return account ? { id: account._id.toString(), status: account.status, token_version: account.token_version ?? 0 } : null;
 }
 
 export async function getAdminPermissions(adminId) {
@@ -38,7 +38,7 @@ export async function requireAuth(req, res, next) {
       return res.status(401).json({ message: "Missing Bearer token" });
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] });
     const parsedAdminId = parseObjectId(decoded.adminId ?? decoded.sub);
     if (!parsedAdminId) {
       auditLog({ action: "admin.auth", target: `${req.method} ${req.path}`, outcome: "invalid_token" });
@@ -47,7 +47,7 @@ export async function requireAuth(req, res, next) {
 
     const adminId = parsedAdminId.toString();
     const account = await getAdminAuthAccount(adminId);
-    if (!account) {
+    if (!account || !Number.isInteger(decoded.token_version) || decoded.token_version !== account.token_version) {
       auditLog({ action: "admin.auth", actor: adminId, target: `${req.method} ${req.path}`, outcome: "unknown_account" });
       return res.status(401).json({ message: "Invalid or expired token" });
     }
@@ -57,10 +57,11 @@ export async function requireAuth(req, res, next) {
       return res.status(activeCheck.statusCode).json({ message: activeCheck.message });
     }
 
-    req.admin = { adminId, role: decoded.role };
+    req.admin = { adminId, role: decoded.role, token_version: decoded.token_version, exp: decoded.exp };
 
     next();
   } catch (err) {
+    if (!["JsonWebTokenError", "TokenExpiredError", "NotBeforeError"].includes(err?.name)) return res.status(503).json({ message: "Authentication is temporarily unavailable" });
     auditLog({ action: "admin.auth", target: `${req.method} ${req.path}`, outcome: "invalid_or_expired" });
     return res.status(401).json({ message: "Invalid or expired token" });
   }
@@ -92,6 +93,13 @@ export function requirePermission(permission) {
       return res.status(500).json({ message: "Server error" });
     }
   };
+}
+
+export async function isAdminSessionValid(session, permission) {
+  if (!session || !Number.isInteger(session.exp) || session.exp * 1000 <= Date.now()) return false;
+  const account = await getAdminAuthAccount(session.adminId);
+  if (!account || account.status === "deactivated" || account.token_version !== session.token_version) return false;
+  return (await getAdminPermissions(session.adminId)).includes(permission);
 }
 
 export const requireAdminAuth = requireAuth;

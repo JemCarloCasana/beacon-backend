@@ -1,7 +1,14 @@
 import { ReducedUserProfile as UserProfile, FriendConnection } from "../models/Reduced.js";
 import { chooseBootstrapFullName } from "../utils/userNameFallbacks.js";
+import { getServiceAreaError } from "../utils/serviceArea.js";
 
 const BEACON_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+export function assertProfileActive(profile) {
+  if (profile?.status === "deactivated") {
+    throw Object.assign(new Error("Account is deactivated"), { statusCode: 403, code: "ACCOUNT_DEACTIVATED" });
+  }
+}
 
 function generateBeaconCode() {
   let code = "BCN-";
@@ -45,9 +52,11 @@ async function insertProfile(fields) {
   return profile;
 }
 
-export async function upsertProfileFromToken(decoded) {
+export async function refreshProfileFromToken(decoded) {
   const uid = decoded.uid;
   const existing = await UserProfile.findOne({ firebase_uid: uid });
+  if (!existing) return null;
+  assertProfileActive(existing);
   const fullName = chooseBootstrapFullName({
     tokenName: decoded.name,
     existingName: existing?.full_name ?? null,
@@ -76,28 +85,12 @@ export async function upsertProfileFromToken(decoded) {
     return existing;
   }
 
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    try {
-      return await insertProfile({
-        firebase_uid: uid,
-        email,
-        full_name: fullName,
-      });
-    } catch (error) {
-      if (error?.code === 11000) {
-        const concurrent = await UserProfile.findOne({ firebase_uid: uid });
-        if (concurrent) return concurrent;
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw new Error("Unable to generate unique beacon code after retries");
 }
 
-export async function bootstrapProfile({ uid, email, fullName, phoneNumber, role }) {
+export async function bootstrapProfile({ uid, email, fullName, phoneNumber, role, latitude, longitude }) {
   const existing = await UserProfile.findOne({ firebase_uid: uid });
   if (existing) {
+    assertProfileActive(existing);
     existing.email = normalizeEmail(email, uid);
     existing.full_name = fullName;
     existing.phone_number = phoneNumber ?? null;
@@ -107,6 +100,9 @@ export async function bootstrapProfile({ uid, email, fullName, phoneNumber, role
     await existing.save();
     return existing;
   }
+
+  const locationError = getServiceAreaError(latitude, longitude);
+  if (locationError) throw locationError;
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     try {
@@ -120,7 +116,7 @@ export async function bootstrapProfile({ uid, email, fullName, phoneNumber, role
     } catch (error) {
       if (error?.code === 11000) {
         const concurrent = await UserProfile.findOne({ firebase_uid: uid });
-        if (concurrent) return bootstrapProfile({ uid, email, fullName, phoneNumber, role });
+        if (concurrent) return bootstrapProfile({ uid, email, fullName, phoneNumber, role, latitude, longitude });
         continue;
       }
       throw error;

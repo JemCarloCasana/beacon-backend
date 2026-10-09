@@ -66,3 +66,13 @@ test("broadcast acknowledgement rejects users without a Mongo delivery", async (
   assert.equal(res.statusCode, 404);
   assert.deepEqual(res.body, { message: "Delivery not found" });
 });
+
+test("broadcast inbox and acknowledgement require a validated Beacon profile", async (t) => {
+  stub(t, UserProfile, "findOne", async () => null);
+  for (const [path, method] of [["/admin/broadcasts/my/inbox", "get"], ["/admin/broadcasts/:id/ack", "post"]]) {
+    const res = response();
+    await handler(path, method)({ auth: { uid: "firebase-only" }, params: { id: new mongoose.Types.ObjectId().toString() } }, res);
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.body.code, "PROFILE_SETUP_REQUIRED");
+  }
+});

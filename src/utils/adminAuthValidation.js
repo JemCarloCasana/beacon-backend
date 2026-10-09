@@ -1,6 +1,5 @@
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FULL_NAME_REGEX = /^[\p{L} .'-]+$/u;
-const SIGNUP_ROLE = "personnel";
 const ADMIN_CREATION_ROLES = ["admin", "personnel"];
 
 function isNonEmptyString(value) {
@@ -59,61 +58,6 @@ function validateLoginPayload(payload) {
   return { errors, normalized };
 }
 
-function validateSignupPayload(payload) {
-  const body = payload && typeof payload === "object" ? payload : {};
-  const errors = {};
-  const normalized = {};
-
-  if (!isNonEmptyString(body.email)) {
-    errors.email = "Email is required";
-  } else {
-    const email = normalizeEmail(body.email);
-    if (!SIMPLE_EMAIL_REGEX.test(email)) {
-      errors.email = "Invalid email format";
-    } else {
-      normalized.email = email;
-    }
-  }
-
-  if (!isNonEmptyString(body.full_name)) {
-    errors.full_name = "Full name is required";
-  } else {
-    const fullName = normalizeFullName(body.full_name);
-    if (fullName.length < 2 || fullName.length > 100) {
-      errors.full_name = "Full name must be between 2 and 100 characters";
-    } else if (!FULL_NAME_REGEX.test(fullName)) {
-      errors.full_name = "Full name contains invalid characters";
-    } else {
-      normalized.full_name = fullName;
-    }
-  }
-
-  if (!isNonEmptyString(body.password)) {
-    errors.password = "Password is required";
-  } else if (body.password.length < 10) {
-    errors.password = "Password must be at least 10 characters";
-  } else if (countPasswordClasses(body.password) < 3) {
-    errors.password = "Password must include at least 3 of uppercase, lowercase, number, and special character";
-  } else {
-    normalized.password = body.password;
-  }
-
-  if (body.role != null) {
-    if (typeof body.role !== "string") {
-      errors.role = 'Role must be "personnel"';
-    } else {
-      const role = body.role.trim().toLowerCase();
-      if (role !== SIGNUP_ROLE) {
-        errors.role = 'Role must be "personnel"';
-      }
-    }
-  }
-
-  normalized.role = SIGNUP_ROLE;
-
-  return { errors, normalized };
-}
-
 function validateAdminCreatePayload(payload) {
   const body = payload && typeof payload === "object" ? payload : {};
   const errors = {};
@@ -147,6 +91,8 @@ function validateAdminCreatePayload(payload) {
     errors.password = "Password is required";
   } else if (body.password.length < 10) {
     errors.password = "Password must be at least 10 characters";
+  } else if (Buffer.byteLength(body.password, "utf8") > 72) {
+    errors.password = "Password must be at most 72 bytes";
   } else if (countPasswordClasses(body.password) < 3) {
     errors.password = "Password must include at least 3 of uppercase, lowercase, number, and special character";
   } else {
@@ -169,9 +115,7 @@ function validateAdminCreatePayload(payload) {
 
 export {
   ADMIN_CREATION_ROLES,
-  SIGNUP_ROLE,
   validateAdminCreatePayload,
   buildValidationError,
-  validateLoginPayload,
-  validateSignupPayload
+  validateLoginPayload
 };
