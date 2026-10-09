@@ -1,9 +1,32 @@
-node_modules
+# Dependencies and generated files
+node_modules/
+coverage/
+.nyc_output/
+.firebase/
+
+# Local environment and credentials
 .env
-serviceAccountKey.json
+.env.*
+!.env.example
+serviceAccountKey*.json
 1.json
 *firebase-adminsdk*.json
-firebase-debug.log
-firestore-debug.log
-.security-*.log
+
+# Logs and temporary work files
+*.log
+logs/
 .security-*.mjs
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local Markdown documentation
+*.md
