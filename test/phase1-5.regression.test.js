@@ -44,7 +44,7 @@ test("delete enforces current database role through the middleware chain", async
   t.mock.method(AdminRecord, "findOne", () => ({ select: (projection) => ({ lean: async () => projection.permissions ? { permissions } : { _id: adminId, role, status: "active" } }) }));
   t.mock.method(Broadcast, "findOneAndDelete", () => ({ lean: async () => { deletes++; return draft; } }));
   t.mock.method(Notification, "deleteMany", async () => ({ deletedCount: 0 }));
-  const token = jwt.sign({ adminId: adminId.toString(), role: "admin" }, process.env.ADMIN_JWT_SECRET);
+  const token = jwt.sign({ adminId: adminId.toString(), role: "admin", token_version: 0 }, process.env.ADMIN_JWT_SECRET);
   async function run(authorization) {
     const req = { params: { id: broadcastId.toString() }, headers: { authorization } }, res = response();
     for (const entry of route("delete")) {

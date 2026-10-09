@@ -32,7 +32,7 @@ test("POST /incidents embeds evidence in a single Mongo document", async (t) => 
     status(code) { this.statusCode = code; return this; },
     json(body) { this.body = body; return this; },
   };
-  await handler({ auth: { uid: "firebase-7" }, body: { incident_type: "Fire", description: "Smoke in building", images: ["data:image/jpeg;base64,/9j/2Q=="] } }, res);
+  await handler({ auth: { uid: "firebase-7" }, body: { incident_type: "Fire", description: "Smoke in building", latitude: 16.0435, longitude: 120.3354, images: ["data:image/jpeg;base64,/9j/2Q=="] } }, res);
 
   assert.equal(res.statusCode, 201);
   assert.equal(res.body.images_count, 1);

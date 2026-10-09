@@ -6,12 +6,66 @@ import { appendThreadStatusEvent, createSosThreadWithRootEvent, publishSosDeltaB
 import { AdminRecord, FriendConnection, Notification, ReducedUserProfile as UserProfile, SosRecord } from "../models/Reduced.js";
 import { findProfileByUid } from "../services/userProfiles.js";
 import { parseObjectId } from "../utils/objectId.js";
+import { getServiceAreaError } from "../utils/serviceArea.js";
+import { getThreadStateAnyStatus, listLiveThreads, parseLiveListParams } from "../services/sosLiveOps.js";
+import { recordSosLocation } from "../services/sosLocationHistory.js";
 
 const router = express.Router();
 const SOS_CATEGORIES = new Set(["medical", "fire", "violence", "unknown"]);
 const SOS_TERMINAL_STATUSES = new Set(["cancelled", "safe"]);
 const SOS_TERMINAL_SOURCES = new Set(["android"]);
 const IS_DEBUG_LOG = String(process.env.LOG_LEVEL || "").toLowerCase() === "debug";
+
+function mobileSnapshot(snapshot, userId) {
+  return { ...snapshot, can_close: snapshot.user_id === userId.toString() && snapshot.latest_status === "active" };
+}
+
+async function canReadCase(thread, userId) {
+  return thread.user_id.equals(userId) || Boolean(await FriendConnection.exists({ record_type: "friendship", user_ids: { $all: [userId, thread.user_id] } }));
+}
+
+router.get("/sos/live", requireAppAuth, async (req, res) => {
+  res.set?.("Cache-Control", "no-store");
+  const parsed = parseLiveListParams({ ...req.query, status: "active" });
+  if (!parsed.ok) return res.status(400).json({ message: parsed.message });
+  const userId = req.userProfile._id;
+  const friendships = await FriendConnection.find({ record_type: "friendship", user_ids: userId }).lean();
+  const userIds = [userId, ...friendships.flatMap(row => row.user_ids.filter(id => !id.equals(userId)))];
+  const { rows, nextCursor } = await listLiveThreads({ ...parsed.params, userIds });
+  return res.json({ rows: rows.map(row => mobileSnapshot(row, userId)), next_cursor: nextCursor });
+});
+
+router.get("/sos/:sosId/live", requireAppAuth, async (req, res) => {
+  const sosId = parseObjectId(req.params.sosId);
+  if (!sosId) return res.status(400).json({ message: "Invalid sosId" });
+  const thread = await SosRecord.findOne({ root_event_id: sosId, record_type: "case" }).lean();
+  if (!thread) return res.status(404).json({ message: "SOS not found" });
+  if (!await canReadCase(thread, req.userProfile._id)) return res.status(403).json({ message: "SOS access is no longer available" });
+  const snapshot = await getThreadStateAnyStatus(sosId);
+  res.set?.("Cache-Control", "no-store");
+  return res.json(mobileSnapshot(snapshot, req.userProfile._id));
+});
+
+router.patch("/sos/:sosId/location", requireAppAuth, async (req, res) => {
+  const { latitude, longitude } = req.body ?? {};
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return res.status(400).json({ code: "INVALID_LOCATION", message: "Provide valid latitude and longitude." });
+  const sosId = parseObjectId(req.params.sosId);
+  if (!sosId) return res.status(400).json({ message: "Invalid sosId" });
+  const thread = await SosRecord.findOne({ root_event_id: sosId, record_type: "case" }).lean();
+  if (!thread) return res.status(404).json({ message: "SOS not found" });
+  if (!thread.user_id.equals(req.userProfile._id)) return res.status(403).json({ message: "Only the owner may update SOS location" });
+  const now = new Date();
+  const updated = await SosRecord.findOneAndUpdate(
+    { _id: thread._id, record_type: "case", user_id: req.userProfile._id, latest_status: "active" },
+    { $set: { latitude, longitude, location_updated_at: now, updated_at: now } },
+    { returnDocument: "after" }
+  ).lean();
+  if (!updated) return res.status(409).json({ message: "SOS is no longer active" });
+  const snapshot = mobileSnapshot(await getThreadStateAnyStatus(sosId), req.userProfile._id);
+  void recordSosLocation({ ...snapshot, latest_latitude: latitude, latest_longitude: longitude, location_updated_at: now });
+  void publishSosDeltaBySosId(sosId).catch(() => {});
+  return res.json(snapshot);
+});
 
 function logDebug(event, payload) {
   if (!IS_DEBUG_LOG) {
@@ -25,7 +79,7 @@ async function notifyAdminsAboutSos({ sosId, fullName, category }) {
   const senderName = typeof fullName === "string" && fullName.trim() ? fullName.trim() : "Unknown";
   const alertMessage = `${senderName} created an SOS (${category}).`;
 
-  const adminIds = (await AdminRecord.find({ record_type: "account", status: "active" }).select({ _id: 1 }).lean()).map((row) => row._id);
+  const adminIds = (await AdminRecord.find({ record_type: "account", status: "active", permissions: "manage_sos" }).select({ _id: 1 }).lean()).map((row) => row._id);
   if (adminIds.length === 0) {
     console.warn("[sos-routes] No active admin recipients for SOS notification", {
       sosId: sosId.toString()
@@ -82,13 +136,11 @@ function parseOptionalResolvedAt(value) {
 
 router.post("/sos", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
-  const { latitude, longitude, address, message } = req.body;
+  const { latitude, longitude, address, message } = req.body ?? {};
 
-  if (latitude != null && typeof latitude !== "number") {
-    return res.status(400).json({ message: "Invalid latitude" });
-  }
-  if (longitude != null && typeof longitude !== "number") {
-    return res.status(400).json({ message: "Invalid longitude" });
+  const locationError = getServiceAreaError(latitude, longitude);
+  if (locationError) {
+    return res.status(locationError.statusCode).json({ code: locationError.code, message: locationError.message });
   }
   if (address != null && typeof address !== "string") {
     return res.status(400).json({ message: "Invalid address" });
@@ -125,13 +177,14 @@ router.post("/sos", requireAppAuth, async (req, res) => {
       const now = new Date();
       await createSosThreadWithRootEvent({
         event: { _id: eventId, user_id: userId, sos_id: eventId, thread_id: threadId, latitude: latitude ?? undefined, longitude: longitude ?? undefined, address: address ?? undefined, message: message ?? undefined, status: "active", actor_type: "user", event_type: "report_created", emergency_category: normalizedCategory, created_at: now },
-        thread: { _id: threadId, root_event_id: eventId, user_id: userId, latest_status: "active", emergency_category: normalizedCategory, created_at: now, updated_at: now },
+        thread: { _id: threadId, root_event_id: eventId, user_id: userId, latitude, longitude, location_updated_at: now, latest_status: "active", emergency_category: normalizedCategory, created_at: now, updated_at: now },
       });
+      void recordSosLocation({ sos_id: eventId.toString(), user_id: userId.toString(), latest_status: "active", latest_latitude: latitude, latest_longitude: longitude, location_updated_at: now });
       publishSosDeltaBySosId(eventId).catch(() => {});
       await notifyAdminsAboutSos({ sosId: eventId, fullName, category: normalizedCategory }).catch(() => {});
       const friendshipRows = await FriendConnection.find({ record_type: "friendship", user_ids: userId }).lean();
       const friendIds = [...new Map(friendshipRows.flatMap((row) => row.user_ids.filter((id) => !id.equals(userId)).map((id) => [id.toString(), id]))).values()];
-      const friends = friendIds.length ? await UserProfile.find({ _id: { $in: friendIds } }).select({ devices: 1 }).lean() : [];
+      const friends = friendIds.length ? await UserProfile.find({ _id: { $in: friendIds }, status: "active" }).select({ devices: 1 }).lean() : [];
       const tokens = [...new Set(friends.flatMap((friend) => friend.devices).filter((device) => device.is_active).map((device) => device.fcm_token).filter(Boolean))];
       if (!tokens.length) return res.status(200).json({ sos_id: eventId.toString(), category: normalizedCategory, notified_users: friendIds.length, notified_devices: 0, message: friendIds.length ? "SOS created, but no device tokens found for your friends." : "SOS created, but you have no Beacon friends to notify." });
       try {
@@ -172,10 +225,7 @@ router.patch("/sos/:sosId/status", requireAppAuth, async (req, res) => {
     const userId = mongoUser._id;
     const thread = await SosRecord.findOne({ root_event_id: sosId, record_type: "case" }).lean();
     if (!thread) return res.status(404).json({ message: "SOS thread not found" });
-    if (!thread.user_id.equals(userId)) {
-      const friendship = await FriendConnection.exists({ record_type: "friendship", user_ids: { $all: [userId, thread.user_id] } });
-      if (!friendship) return res.status(403).json({ message: "Forbidden" });
-    }
+    if (!thread.user_id.equals(userId)) return res.status(403).json({ message: "Only the owner may close this SOS" });
     if (thread.latest_status !== "active") return res.status(409).json({ message: `Cannot update SOS in status '${thread.latest_status}'` });
     const resolvedAt = parsedResolvedAt.value ? new Date(parsedResolvedAt.value) : new Date();
     try {

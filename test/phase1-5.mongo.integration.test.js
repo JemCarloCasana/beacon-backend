@@ -15,11 +15,17 @@ import { sendBroadcastByPublicId } from "../src/services/broadcastSend.js";
 import { upsertMany, advanceCounter, compareImportedDocuments } from "./mongoImportHelpers.js";
 
 test("isolated Atlas migration and transaction checks", { skip: process.env.BEACON_RUN_MONGO_TESTS !== "1" }, async (t) => {
-  const dbName = `beacon_fix_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+  const dbName = process.env.MONGODB_TEST_DB_NAME;
+  const uri = process.env.MONGODB_TEST_URI;
+  assert.ok(uri, "A separate MONGODB_TEST_URI is required");
+  assert.match(dbName ?? "", /^beacon_test_[a-z0-9_]{8,64}$/, "An explicitly named disposable test database is required");
+  assert.notEqual(uri, process.env.MONGODB_URI, "Production credentials must never be used for tests");
+  if (process.env.MONGODB_URI) assert.notEqual(new URL(uri).username, new URL(process.env.MONGODB_URI).username, "Tests require a separate MongoDB account");
+  assert.notEqual(dbName, process.env.MONGODB_DB_NAME);
   let owned = false;
   try {
     try {
-      await mongoose.connect(process.env.MONGODB_URI, { dbName, serverSelectionTimeoutMS: 10000, autoCreate: false, autoIndex: false });
+      await mongoose.connect(uri, { dbName, serverSelectionTimeoutMS: 10000, autoCreate: false, autoIndex: false, tlsAllowInvalidCertificates: false, tlsAllowInvalidHostnames: false });
     } catch {
       throw new Error("Unable to connect to isolated Atlas test database");
     }
@@ -111,7 +117,7 @@ test("isolated Atlas migration and transaction checks", { skip: process.env.BEAC
       }
     });
   } finally {
-    if (owned && mongoose.connection.name === dbName && /^beacon_fix_[a-f0-9]{24}$/.test(dbName)) {
+    if (owned && mongoose.connection.name === dbName && /^beacon_test_[a-z0-9_]{8,64}$/.test(dbName) && dbName !== process.env.MONGODB_DB_NAME) {
       await mongoose.connection.db.dropDatabase();
       console.log("Isolated test database removed");
     }

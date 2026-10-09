@@ -373,6 +373,9 @@ export async function notifyUserLifecycleEvent(input) {
 
   logNotificationTrace("start", resolvedTrace);
 
+  const recipient = await UserProfile.findById(built.recipientUserId).select({ status: 1 }).lean();
+  if (!recipient || recipient.status === "deactivated") return { ok: true, skipped: true, reason: "inactive_recipient" };
+
   const created = await Notification.create({
     record_type: "user",
     recipient_type: "user",
@@ -529,7 +532,7 @@ export async function notifySosFriendsTerminalEvent(input) {
 
   let tokens = [];
   try {
-    const friends = await UserProfile.find({ _id: { $in: friendUserIds } }).select({ devices: 1 }).lean();
+    const friends = await UserProfile.find({ _id: { $in: friendUserIds }, status: "active" }).select({ devices: 1 }).lean();
     tokens = friends.flatMap((friend) => friend.devices).filter((device) => device.is_active).map((device) => device.fcm_token).filter(Boolean);
   } catch (err) {
     console.error("[user-notifications] failed to load friend device tokens:", err?.message || err, {

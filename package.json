@@ -10,10 +10,12 @@
   },
   "scripts": {
     "dev": "node --watch server.js",
+    "test:security": "node test/securityHardening.test.js && node test/mongoSecurity.test.js",
+    "test:firestore": "firebase emulators:exec --only firestore --project demo-beacon-security \"node test/firestoreRules.emulator.test.mjs\"",
     "start": "node server.js",
     "start:prod": "NODE_ENV=production node server.js",
     "hash:admin-password": "node scripts/generateBcryptHash.js",
-    "test": "node test/sosAtomicity.test.js && node test/incidentAtomicity.test.js && node test/remainingModels.test.js && node test/contactDeviceRoutes.mongo.test.js && node test/adminAuthRoutes.contract.test.js && node test/meRoutes.patch.test.js && node test/meRoutes.bootstrap.test.js && node test/adminUsers.patch.test.js && node test/adminAdmins.patch.test.js && node test/broadcastRoutes.auth.test.js && node test/broadcastRoutes.create.test.js && node test/requireAuth.middleware.test.js && node test/friendRoutes.test.js && node test/adminSosRoutes.liveops.test.js && node test/incidentRoutes.admin.test.js && node test/sosRoutes.test.js && node test/adminReportsRoutes.test.js && node test/userNotifications.test.js && node test/phase1-5.regression.test.js && node test/security.http.test.js"
+    "test": "node test/serviceArea.test.js && node test/sosAtomicity.test.js && node test/incidentAtomicity.test.js && node test/remainingModels.test.js && node test/contactDeviceRoutes.mongo.test.js && node test/adminAuthRoutes.contract.test.js && node test/meRoutes.patch.test.js && node test/meRoutes.bootstrap.test.js && node test/adminUsers.patch.test.js && node test/adminAdmins.patch.test.js && node test/broadcastRoutes.auth.test.js && node test/broadcastRoutes.create.test.js && node test/requireAuth.middleware.test.js && node test/friendRoutes.test.js && node test/adminSosRoutes.liveops.test.js && node test/incidentRoutes.admin.test.js && node test/sosRoutes.test.js && node test/adminReportsRoutes.test.js && node test/userNotifications.test.js && node test/phase1-5.regression.test.js && node test/security.http.test.js && node test/securityHardening.test.js && node test/mongoSecurity.test.js"
   },
   "keywords": [
     "beacon",

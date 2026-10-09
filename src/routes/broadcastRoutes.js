@@ -67,7 +67,11 @@ async function resolveAuthenticatedInboxUserId(req, res) {
 
   const profile = await findProfileByUid(uid);
   if (!profile) {
-    res.status(404).json({ message: "User account not found. Call /me/bootstrap first." });
+    res.status(403).json({ code: "PROFILE_SETUP_REQUIRED", message: "Complete your Beacon profile in Dagupan City to continue." });
+    return null;
+  }
+  if (profile.status === "deactivated") {
+    res.status(403).json({ code: "ACCOUNT_DEACTIVATED", message: "Account is deactivated" });
     return null;
   }
   return profile._id;
@@ -222,7 +226,7 @@ router.get("/admin/broadcasts", requireAdminAuth, async (req, res) => {
     }
 
     const permissions = await getAdminPermissions(adminId.toString());
-    if (permissions.length > 0 && !permissions.includes("view_broadcasts")) {
+    if (!permissions.includes("view_broadcasts")) {
       return res.status(403).json({ message: "Insufficient permissions" });
     }
 

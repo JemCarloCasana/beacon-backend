@@ -14,11 +14,7 @@ export function isMongoConnected() {
   return mongoose.connection?.readyState === 1;
 }
 
-export async function connectMongo({ dbName } = {}) {
-  if (isMongoConnected()) {
-    return mongoose.connection;
-  }
-
+export async function connectMongo({ dbName, autoIndex = true, autoCreate = true } = {}) {
   const uri = getMongoUri();
   if (!uri) {
     throw new Error("MONGODB_URI is not configured");
@@ -26,11 +22,23 @@ export async function connectMongo({ dbName } = {}) {
 
   mongoose.set("strictQuery", true);
   const selectedDbName = dbName || process.env.MONGODB_DB_NAME || process.env.MONGO_DISPOSABLE_DB_NAME || undefined;
+  const production = process.env.NODE_ENV === "production";
+  if (production) {
+    if (!process.env.MONGODB_DB_NAME?.trim()) throw new Error("MONGODB_DB_NAME is required in production");
+    if (process.env.MONGO_DISPOSABLE_DB_NAME || (dbName && dbName !== process.env.MONGODB_DB_NAME)) throw new Error("Production refuses disposable database overrides");
+    const options = new URL(uri).searchParams;
+    for (const [key, value] of options) {
+      if ((["tlsallowinvalidcertificates", "tlsallowinvalidhostnames", "tlsinsecure"].includes(key.toLowerCase()) && value.toLowerCase() !== "false") || (["tls", "ssl"].includes(key.toLowerCase()) && value.toLowerCase() !== "true")) throw new Error("Production requires verified TLS");
+    }
+  }
+  if (isMongoConnected()) return mongoose.connection;
 
   try {
     await mongoose.connect(uri, {
       ...(selectedDbName ? { dbName: selectedDbName } : {}),
-      autoIndex: true,
+      ...(production ? { tls: true, tlsAllowInvalidCertificates: false, tlsAllowInvalidHostnames: false } : {}),
+      autoIndex,
+      autoCreate,
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 5_000,
       connectTimeoutMS: 5_000,

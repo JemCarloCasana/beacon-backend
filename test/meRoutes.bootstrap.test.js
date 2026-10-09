@@ -65,7 +65,7 @@ test("POST /me/bootstrap accepts citizen and normalizes mixed-case role", async 
 
   const req = {
     auth: { uid: "uid-citizen", email: "citizen@example.com" },
-    body: { full_name: "Citizen User", phone_number: "09123456789", role: "CiTiZen" },
+    body: { full_name: "Citizen User", phone_number: "09123456789", role: "CiTiZen", latitude: 16.0435, longitude: 120.3354 },
   };
   const res = createRes();
 
@@ -82,7 +82,7 @@ test("POST /me/bootstrap accepts student role", async (t) => {
 
   const req = {
     auth: { uid: "uid-student", email: "student@example.com" },
-    body: { full_name: "Student User", role: "student" },
+    body: { full_name: "Student User", role: "student", latitude: 16.0435, longitude: 120.3354 },
   };
   const res = createRes();
 

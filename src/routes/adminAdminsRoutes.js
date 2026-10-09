@@ -503,7 +503,10 @@ router.get("/admin/notifications", requireAuth, async (req, res) => {
       return res.status(401).json({ message: "Unauthorized" });
     }
 
-    const docs = await Notification.find({ record_type: "admin", recipient_type: "admin", recipient_id: adminId })
+    const permissions = await getAdminPermissions(adminId.toString());
+    const operational = { sos: "manage_sos", incident: "view_incidents", incident_report: "view_incidents", broadcast: "view_broadcasts" };
+    const excluded = Object.keys(operational).filter(type => !permissions.includes(operational[type]));
+    const docs = await Notification.find({ record_type: "admin", recipient_type: "admin", recipient_id: adminId, type: { $nin: excluded } })
       .sort({ created_at: -1, _id: -1 })
       .lean();
     logDebug("notifications.list", {

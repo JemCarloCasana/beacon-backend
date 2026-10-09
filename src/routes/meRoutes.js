@@ -1,5 +1,6 @@
 import express from "express";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
+import { requireAuth } from "../middleware/requireAuth.js";
 import { bootstrapProfile, findProfileByUid, profileToDto, searchProfiles } from "../services/userProfiles.js";
 
 const router = express.Router();
@@ -94,9 +95,9 @@ function isValidBootstrapFullName(value) {
  *
  * Adds: beacon_code (generated once)
  */
-router.post("/me/bootstrap", requireAppAuth, async (req, res) => {
+router.post("/me/bootstrap", requireAuth, async (req, res) => {
   const { uid, email } = req.auth;
-  const { full_name, phone_number, role } = req.body ?? {};
+  const { full_name, phone_number, role, latitude, longitude } = req.body ?? {};
 
   if (!full_name || !isValidBootstrapFullName(full_name)) {
     return res.status(400).json({ message: "Invalid full_name" });
@@ -119,9 +120,14 @@ router.post("/me/bootstrap", requireAppAuth, async (req, res) => {
       fullName: full_name.trim(),
       phoneNumber: normalizedPhone,
       role: normalizedRole,
+      latitude,
+      longitude,
     });
     return res.json(profileToDto(profile));
   } catch (error) {
+    if ([400, 403, 422].includes(error?.statusCode)) {
+      return res.status(error.statusCode).json({ code: error.code, message: error.message });
+    }
     console.error("BOOTSTRAP ERROR:", error?.message || error);
     if (error?.code === 11000) return res.status(409).json({ message: "Conflict. Please try again." });
     return res.status(500).json({ message: "Server error" });

@@ -1,13 +1,12 @@
 import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import { assertAccountActive } from "../middleware/adminAuth.js";
+import { assertAccountActive, requireAdminAuth } from "../middleware/adminAuth.js";
 import { AdminRecord } from "../models/Reduced.js";
 import {
-  SIGNUP_ROLE,
   buildValidationError,
   validateLoginPayload,
-  validateSignupPayload
+  validateAdminCreatePayload
 } from "../utils/adminAuthValidation.js";
 import { auditLog } from "../utils/auditLog.js";
 
@@ -15,7 +14,7 @@ const router = express.Router();
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
 if (!JWT_SECRET) throw new Error("Missing ADMIN_JWT_SECRET in .env");
 
-const DEFAULT_ADMIN_JWT_TTL = "7d";
+const DEFAULT_ADMIN_JWT_TTL = "8h";
 
 export function resolveAdminJwtTtl() {
   const allowTestTtl = String(process.env.ALLOW_TEST_JWT_TTL || "").toLowerCase() === "true";
@@ -34,52 +33,6 @@ if (jwtTtl.testHook) {
   console.warn(`[admin-auth] TEST JWT TTL enabled: expiresIn=${jwtTtl.ttl} (never enable in production)`);
 }
 
-function logAdminLoginDebug({ submittedEmail, adminFound, status, compareResult }) {
-  console.debug("[admin-auth] login-debug", {
-    submittedEmail,
-    adminFound,
-    status,
-    compareResult
-  });
-}
-
-// POST /admin/auth/signup
-router.post("/admin/auth/signup", async (req, res) => {
-  let email = null;
-  try {
-    const { errors, normalized } = validateSignupPayload(req.body);
-    if (Object.keys(errors).length > 0) {
-      return res.status(422).json(buildValidationError(errors));
-    }
-    email = normalized.email;
-
-    const existing = await AdminRecord.findOne({ record_type: "account", email: normalized.email }).select({ _id: 1 }).lean();
-    if (existing) {
-      auditLog({ action: "admin.signup", actor: null, target: normalized.email, outcome: "duplicate_email" });
-      return res.status(409).json({ message: "Email already registered" });
-    }
-    const password_hash = await bcrypt.hash(normalized.password, 12);
-    const admin = await AdminRecord.create({
-      record_type: "account", email: normalized.email,
-      password_hash, full_name: normalized.full_name, role: SIGNUP_ROLE, permissions: [],
-    });
-    const permissions = admin.permissions ?? [];
-    const token = jwt.sign(
-      { sub: admin._id.toString(), adminId: admin._id.toString(), role: SIGNUP_ROLE },
-      JWT_SECRET, { expiresIn: jwtTtl.ttl }
-    );
-    auditLog({ action: "admin.signup", actor: admin._id.toString(), target: admin.email, outcome: "created" });
-    return res.status(201).json({ token, admin: { id: admin._id.toString(), email: admin.email, full_name: admin.full_name, role: SIGNUP_ROLE, permissions } });
-    } catch (e) {
-      if (e?.code === 11000) {
-        auditLog({ action: "admin.signup", actor: null, target: email, outcome: "duplicate_email" });
-        return res.status(409).json({ message: "Email already registered" });
-      }
-    console.error(e);
-    return res.status(500).json({ message: "Server error" });
-  }
-});
-
 // POST /admin/auth/login
 router.post("/admin/auth/login", async (req, res) => {
   try {
@@ -90,24 +43,11 @@ router.post("/admin/auth/login", async (req, res) => {
 
     const row = await AdminRecord.findOne({ record_type: "account", email: normalized.email }).lean();
     if (!row) {
-      logAdminLoginDebug({ submittedEmail: normalized.email, adminFound: false, status: null, compareResult: null });
       auditLog({ action: "admin.login", actor: null, target: normalized.email, outcome: "invalid_credentials" });
       return res.status(401).json({ message: "Invalid credentials" });
     }
-    logAdminLoginDebug({
-      submittedEmail: normalized.email,
-      adminFound: true,
-      status: row.status,
-      compareResult: null
-    });
 
     const ok = await bcrypt.compare(normalized.password, row.password_hash);
-    logAdminLoginDebug({
-      submittedEmail: normalized.email,
-      adminFound: true,
-      status: row.status,
-      compareResult: ok
-    });
 
     if (!ok) {
       auditLog({ action: "admin.login", actor: row._id.toString(), target: normalized.email, outcome: "invalid_credentials" });
@@ -120,8 +60,9 @@ router.post("/admin/auth/login", async (req, res) => {
     }
 
     const permissions = row.permissions ?? [];
+    if (row.token_version == null) await AdminRecord.updateOne({ _id: row._id, record_type: "account", token_version: { $exists: false } }, { $set: { token_version: 0 } });
     const token = jwt.sign(
-      { sub: row._id.toString(), adminId: row._id.toString(), role: row.role },
+      { sub: row._id.toString(), adminId: row._id.toString(), role: row.role, token_version: row.token_version ?? 0 },
       JWT_SECRET,
       { expiresIn: jwtTtl.ttl }
     );
@@ -142,6 +83,28 @@ router.post("/admin/auth/login", async (req, res) => {
     console.error(e);
     return res.status(500).json({ message: "Server error" });
   }
+});
+
+router.post("/admin/auth/logout", requireAdminAuth, async (req, res) => {
+  try {
+    const result = await AdminRecord.updateOne({ _id: req.admin.adminId, record_type: "account", token_version: req.admin.token_version }, { $inc: { token_version: 1 } });
+    if (result.matchedCount !== 1) return res.status(401).json({ message: "Invalid or expired token" });
+    return res.status(204).end();
+  } catch { return res.status(503).json({ message: "Session invalidation unavailable" }); }
+});
+
+router.post("/admin/auth/change-password", requireAdminAuth, async (req, res) => {
+  const { current_password, new_password } = req.body ?? {};
+  const { errors } = validateAdminCreatePayload({ email: "validation@example.com", full_name: "Validation Account", role: "personnel", password: new_password });
+  if (typeof current_password !== "string" || errors.password) return res.status(422).json({ message: errors.password ?? "Current password is required" });
+  try {
+    const account = await AdminRecord.findOne({ _id: req.admin.adminId, record_type: "account" }).lean();
+    if (!account || !await bcrypt.compare(current_password, account.password_hash)) return res.status(401).json({ message: "Current password is incorrect" });
+    const password_hash = await bcrypt.hash(new_password, 12);
+    const result = await AdminRecord.updateOne({ _id: account._id, record_type: "account", password_hash: account.password_hash, token_version: req.admin.token_version }, { $set: { password_hash, updated_at: new Date() }, $inc: { token_version: 1 } });
+    if (result.matchedCount !== 1) return res.status(409).json({ message: "Account changed; sign in again" });
+    return res.status(204).end();
+  } catch { return res.status(503).json({ message: "Password update unavailable" }); }
 });
 
 export default router;

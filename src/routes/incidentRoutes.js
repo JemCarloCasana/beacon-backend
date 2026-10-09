@@ -1,7 +1,8 @@
 import express from "express";
+import { getServiceAreaError } from "../utils/serviceArea.js";
 import { randomUUID } from "node:crypto";
 import { requireAppAuth } from "../middleware/requireAppAuth.js";
-import { requireAdminAuth } from "../middleware/adminAuth.js";
+import { requireAdminAuth, requirePermission } from "../middleware/adminAuth.js";
 import { notifyUserLifecycleEvent } from "../services/userNotifications.js";
 import { AdminRecord, Notification, ReducedIncidentReport as IncidentReport, ReducedUserProfile as UserProfile } from "../models/Reduced.js";
 import { findProfileByUid } from "../services/userProfiles.js";
@@ -47,7 +48,7 @@ async function notifyAdminsAboutIncident({ incidentId, incidentType }) {
       : "incident";
   const message = `A new ${safeIncidentType} incident was reported.`;
 
-  const adminIds = (await AdminRecord.find({ record_type: "account", status: "active" }).select({ _id: 1 }).lean()).map((row) => row._id);
+  const adminIds = (await AdminRecord.find({ record_type: "account", status: "active", permissions: "view_incidents" }).select({ _id: 1 }).lean()).map((row) => row._id);
   if (adminIds.length === 0) {
     console.warn("[incident-routes] No active admin recipients for incident notification", {
       incidentId: idString(incidentId)
@@ -288,7 +289,7 @@ function parseImageInput(value) {
 }
 
 
-router.get("/admin/incidents", requireAdminAuth, async (req, res) => {
+router.get("/admin/incidents", requireAdminAuth, requirePermission("view_incidents"), async (req, res) => {
   try {
     const status = typeof req.query?.status === "string" ? req.query.status.trim().toLowerCase() : null;
     if (status && !INCIDENT_STATUSES.includes(status)) {
@@ -307,7 +308,7 @@ router.get("/admin/incidents", requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get("/admin/incidents/:id", requireAdminAuth, async (req, res) => {
+router.get("/admin/incidents/:id", requireAdminAuth, requirePermission("view_incidents"), async (req, res) => {
   try {
     const incidentId = parseObjectId(req.params?.id);
     if (!incidentId) {
@@ -329,6 +330,7 @@ router.get("/admin/incidents/:id", requireAdminAuth, async (req, res) => {
 router.patch(
   "/admin/incidents/:id",
   requireAdminAuth,
+  requirePermission("manage_incidents"),
   async (req, res) => {
     try {
       const incidentId = parseObjectId(req.params?.id);
@@ -435,7 +437,8 @@ router.patch(
         if (resolutionNotes !== undefined) set.resolution_notes = resolutionNotes;
         if (effectiveStatus === "dispatched" && !current.dispatched_at) set.dispatched_at = new Date();
         if (effectiveStatus === "resolved" && !current.resolved_at) set.resolved_at = new Date();
-        await IncidentReport.updateOne({ _id: incidentId }, { $set: set });
+        const result = await IncidentReport.updateOne({ _id: incidentId, status: current.status }, { $set: set });
+        if (result.matchedCount !== 1) return res.status(409).json({ message: "Incident changed; refresh and retry" });
         const updated = await getIncidentById(incidentId);
         if (shouldNotifySender) notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "incident", entity_id: incidentId, status: effectiveStatus, assigned_department: updated?.assigned_department ?? current.assigned_department ?? null, trace });
         return res.json(toIncidentDto(updated, { isAdminRoute: true }));
@@ -451,6 +454,7 @@ router.patch(
 router.get(
   "/admin/incidents/:incidentId/images/:imageId",
   requireAdminAuth,
+  requirePermission("view_incidents"),
   async (req, res) => {
     try {
       const incidentId = parseObjectId(req.params?.incidentId);
@@ -510,7 +514,7 @@ router.get("/incidents/:incidentId/images/:imageId", requireAppAuth, async (req,
  */
 router.post("/incidents", requireAppAuth, async (req, res) => {
   const { uid } = req.auth;
-  const { incident_type, description, latitude, longitude, address, images } = req.body;
+  const { incident_type, description, latitude, longitude, address, images } = req.body ?? {};
 
   if (!incident_type || typeof incident_type !== "string") {
     return res.status(400).json({ message: "Invalid incident_type" });
@@ -518,11 +522,9 @@ router.post("/incidents", requireAppAuth, async (req, res) => {
   if (!description || typeof description !== "string" || description.trim().length < 5) {
     return res.status(400).json({ message: "Description must be at least 5 characters" });
   }
-  if (latitude != null && typeof latitude !== "number") {
-    return res.status(400).json({ message: "Invalid latitude" });
-  }
-  if (longitude != null && typeof longitude !== "number") {
-    return res.status(400).json({ message: "Invalid longitude" });
+  const locationError = getServiceAreaError(latitude, longitude);
+  if (locationError) {
+    return res.status(locationError.statusCode).json({ code: locationError.code, message: locationError.message });
   }
   if (address != null && typeof address !== "string") {
     return res.status(400).json({ message: "Invalid address" });

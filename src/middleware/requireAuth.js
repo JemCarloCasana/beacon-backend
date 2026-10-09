@@ -19,7 +19,7 @@ export async function requireAuth(req, res, next) {
       return res.status(401).json({ message: "Missing Bearer token" });
     }
 
-    const checkRevoked = String(process.env.FIREBASE_CHECK_REVOKED || "").toLowerCase() === "true";
+    const checkRevoked = process.env.NODE_ENV === "production" || String(process.env.FIREBASE_CHECK_REVOKED || "").toLowerCase() === "true";
     const decoded = customVerifyIdToken
       ? await customVerifyIdToken(token, checkRevoked)
       : await admin.auth().verifyIdToken(token, checkRevoked);
@@ -32,34 +32,19 @@ export async function requireAuth(req, res, next) {
     };
 
     recordAuthSuccess(Date.now() - startedAt);
-    next();
+    return next();
   } catch (err) {
-    if (err?.code === "ENOENT") {
-      console.error("Auth credential configuration error:", err?.message || err);
-      return res.status(500).json({ message: "Auth provider is misconfigured on server" });
+    const code = err?.code ?? "unknown";
+    if (code === "auth/user-disabled") return res.status(403).json({ code: "ACCOUNT_DEACTIVATED", message: "Account is deactivated" });
+    const invalidCodes = new Set(["auth/argument-error", "auth/invalid-id-token", "auth/id-token-expired", "auth/id-token-revoked", "auth/user-not-found"]);
+    if (!invalidCodes.has(code)) {
+      console.warn("Auth provider unavailable", { code });
+      return res.status(503).json({ code: "AUTH_PROVIDER_UNAVAILABLE", message: "Authentication is temporarily unavailable. Please retry." });
     }
 
     recordAuthFailure("invalid_or_expired");
     const errCode = err?.code || "unknown";
-    const errMessage = err?.message || "verification_error";
-    console.warn("Auth verification failed", {
-      path: req.originalUrl || req.url,
-      method: req.method,
-      ip: req.ip,
-      code: errCode,
-      message: errMessage
-    });
-
-    const includeDebug = String(process.env.AUTH_DEBUG_ERRORS || "").toLowerCase() === "true";
-
-    if (includeDebug) {
-      return res.status(401).json({
-        message: "Invalid or expired token",
-        auth_error_code: errCode,
-        auth_error_message: errMessage,
-      });
-    }
-
+    console.warn("Auth verification failed", { code: errCode });
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 }

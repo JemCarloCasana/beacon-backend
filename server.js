@@ -25,6 +25,7 @@ import { connectMongo, disconnectMongo, isMongoConnected } from "./src/mongo.js"
 import { createRateLimiter } from "./src/middleware/rateLimit.js";
 import { getAuthMetricsSnapshot } from "./src/utils/authMetrics.js";
 import { getSosStreamMetrics } from "./src/services/sosLiveOps.js";
+import { serviceArea } from "./src/utils/serviceArea.js";
 
 const app = express();
 
@@ -107,6 +108,9 @@ app.use((err, req, res, next) => {
 
 // Health checks
 app.get("/health", (req, res) => res.json({ ok: true }));
+
+// Static eligibility data is public and does not depend on MongoDB availability.
+app.get("/service-area", (req, res) => res.json(serviceArea));
 
 app.get("/health/mongo", async (req, res) => {
   try {

@@ -8,10 +8,11 @@ const VALID_LIVE_FILTERS = new Set(["open", "active", "resolved", "cancelled", "
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const REPLAY_WINDOW_MS = 5 * 60 * 1000;
+const streamWrites = new WeakMap();
 
 const sseState = {
   nextEventId: 1,
-  subscribers: new Set(),
+  subscribers: new Map(),
   buffer: [],
   metrics: {
     sos_admin_ack_total: 0,
@@ -58,9 +59,27 @@ function pruneReplayBuffer() {
 }
 
 function writeSseEvent(res, entry) {
-  res.write(`id: ${entry.id}\n`);
-  res.write(`event: ${entry.event}\n`);
-  res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
+  const delivery = (streamWrites.get(res) ?? Promise.resolve()).then(async () => {
+    if (!await checkSseAccess(res)) return false;
+    res.write(`id: ${entry.id}\n`);
+    res.write(`event: ${entry.event}\n`);
+    res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
+    return true;
+  }).catch(() => {
+    closeSubscriber(res);
+    res.end?.();
+    return false;
+  });
+  streamWrites.set(res, delivery);
+  return delivery;
+}
+
+export async function checkSseAccess(res) {
+  const validate = sseState.subscribers.get(res);
+  let allowed = false;
+  try { allowed = Boolean(validate && await validate()); } catch { /* Fail closed. */ }
+  if (!allowed) { closeSubscriber(res); res.end?.(); }
+  return allowed;
 }
 
 function closeSubscriber(res) {
@@ -103,7 +122,7 @@ export function parseLiveListParams(query) {
     const decoded = decodeCursorPayload(query.cursor);
     const parsedSosId = parseObjectId(decoded?.sos_id);
     const parsedTimestamp = decoded?.latest_event_at ? new Date(decoded.latest_event_at) : null;
-    if (!parsedSosId || Number.isNaN(parsedTimestamp?.getTime?.())) {
+    if (!parsedSosId || !parsedTimestamp || Number.isNaN(parsedTimestamp.getTime())) {
       return { ok: false, message: "Invalid cursor" };
     }
     cursor = {
@@ -115,11 +134,13 @@ export function parseLiveListParams(query) {
   return { ok: true, params: { status, limit, cursor } };
 }
 
-export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, cursor = null }) {
+export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, cursor = null, userIds = null }) {
   const filter = status === "open" ? { latest_status: "active" } : status === "cancelled" || status === "safe" ? { latest_status: "resolved", terminal_status: status } : { latest_status: status };
-  const threads = await SosRecord.find({ ...filter, record_type: "case" }).sort({ updated_at: -1, _id: -1 }).limit(limit + 1).lean();
-  const userIds = [...new Map(threads.map((thread) => [thread.user_id.toString(), thread.user_id])).values()];
-  const profiles = await UserProfile.find({ _id: { $in: userIds } }).lean();
+  const scope = userIds ? { user_id: { $in: userIds } } : {};
+  const page = cursor ? { $or: [{ updated_at: { $lt: new Date(cursor.latest_event_at) } }, { updated_at: new Date(cursor.latest_event_at), root_event_id: { $lt: parseObjectId(cursor.sos_id) } }] } : {};
+  const threads = await SosRecord.find({ ...filter, ...scope, ...page, record_type: "case" }).sort({ updated_at: -1, root_event_id: -1 }).limit(limit + 1).lean();
+  const profileIds = [...new Map(threads.map((thread) => [thread.user_id.toString(), thread.user_id])).values()];
+  const profiles = await UserProfile.find({ _id: { $in: profileIds } }).lean();
   const byUser = new Map(profiles.map((profile) => [profile._id.toString(), profile]));
   const events = await SosRecord.find({ record_type: "event", thread_id: { $in: threads.map((thread) => thread._id) } }).sort({ created_at: -1, _id: -1 }).lean();
   const latestByThread = new Map();
@@ -131,8 +152,7 @@ export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, 
     const event = latestByThread.get(thread._id.toString()) ?? root;
     const profile = byUser.get(thread.user_id.toString());
     if (!profile || !event) continue;
-    const row = withThreadAliases({ thread_id: thread._id.toString(), sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), full_name: profile.full_name, phone_number: profile.phone_number, role: profile.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id?.toString() ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event.message ?? null, latest_latitude: event.latitude ?? null, latest_longitude: event.longitude ?? null, latest_address: event.address ?? null, latest_event_at: event.created_at ?? thread.updated_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
-    if (cursor && (new Date(row.latest_event_at) > new Date(cursor.latest_event_at) || (new Date(row.latest_event_at).getTime() === new Date(cursor.latest_event_at).getTime() && row.sos_id >= cursor.sos_id))) continue;
+    const row = withThreadAliases({ thread_id: thread._id.toString(), sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), full_name: profile.full_name, phone_number: profile.phone_number, role: profile.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id?.toString() ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event.message ?? null, latest_latitude: thread.latitude ?? event.latitude ?? root?.latitude ?? null, latest_longitude: thread.longitude ?? event.longitude ?? root?.longitude ?? null, location_updated_at: thread.location_updated_at ?? root?.created_at ?? null, latest_address: event.address ?? null, latest_event_at: thread.updated_at ?? event.created_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
     rows.push(row);
   }
   rows.sort((a, b) => new Date(b.latest_event_at) - new Date(a.latest_event_at) || b.sos_id.localeCompare(a.sos_id));
@@ -142,7 +162,7 @@ export async function listLiveThreads({ status = "open", limit = DEFAULT_LIMIT, 
 }
 
 export async function getThreadStateAnyStatus(sosId) {
-  const rootId = parseObjectId(sosId);
+  const rootId = parseObjectId(sosId?.toString());
   if (!rootId) return null;
   const thread = await SosRecord.findOne({ root_event_id: rootId, record_type: "case" }).lean();
   if (!thread) return null;
@@ -152,11 +172,11 @@ export async function getThreadStateAnyStatus(sosId) {
     SosRecord.findOne({ thread_id: thread._id, record_type: "event" }).sort({ created_at: -1, _id: -1 }).lean(),
   ]);
   const event = latest || root;
-  return withThreadAliases({ thread_id: thread._id.toString(), sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), full_name: profile?.full_name, phone_number: profile?.phone_number, role: profile?.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id?.toString() ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event?.message ?? null, latest_latitude: event?.latitude ?? null, latest_longitude: event?.longitude ?? null, latest_address: event?.address ?? null, latest_event_at: event?.created_at ?? thread.updated_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
+  return withThreadAliases({ thread_id: thread._id.toString(), sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), full_name: profile?.full_name, phone_number: profile?.phone_number, role: profile?.role, latest_status: thread.latest_status, emergency_category: thread.emergency_category, acknowledged_at: thread.acknowledged_at ?? null, assigned_unit: thread.assigned_unit ?? null, acknowledged_by_admin_id: thread.acknowledged_by_admin_id?.toString() ?? null, resolved_at: thread.resolved_at ?? null, terminal_status: thread.terminal_status ?? null, resolved_source: thread.resolved_source ?? null, opened_at: root?.created_at ?? thread.created_at, latest_message: event?.message ?? null, latest_latitude: thread.latitude ?? event?.latitude ?? root?.latitude ?? null, latest_longitude: thread.longitude ?? event?.longitude ?? root?.longitude ?? null, location_updated_at: thread.location_updated_at ?? root?.created_at ?? null, latest_address: event?.address ?? null, latest_event_at: thread.updated_at ?? event?.created_at, requires_attention: thread.latest_status === "active" && !thread.acknowledged_at });
 }
 
 export async function listThreadEvents(sosId) {
-  const rootId = parseObjectId(sosId);
+  const rootId = parseObjectId(sosId?.toString());
   if (!rootId) return [];
   const [events, thread] = await Promise.all([
     SosRecord.find({ sos_id: rootId, record_type: "event" }).sort({ created_at: 1, _id: 1 }).lean(),
@@ -175,12 +195,12 @@ export async function listLiveMapRows() {
   for (const event of events) if (!latestByThread.has(event.thread_id.toString())) latestByThread.set(event.thread_id.toString(), event);
   return threads.flatMap((thread) => {
     const event = latestByThread.get(thread._id.toString());
-    return event ? [{ sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), latitude: event.latitude, longitude: event.longitude, address: event.address, message: event.message, status: thread.latest_status, created_at: event.created_at }] : [];
+    return Number.isFinite(thread.latitude ?? event?.latitude) && Number.isFinite(thread.longitude ?? event?.longitude) ? [{ sos_id: thread.root_event_id.toString(), user_id: thread.user_id.toString(), latitude: thread.latitude ?? event?.latitude, longitude: thread.longitude ?? event?.longitude, location_updated_at: thread.location_updated_at ?? event?.created_at, address: event?.address, message: event?.message, status: thread.latest_status, created_at: thread.updated_at }] : [];
   });
 }
 
 export async function appendThreadStatusEvent({ thread, sosId, threadUpdates, event, createdAt = new Date() }) {
-  const rootId = parseObjectId(sosId);
+  const rootId = parseObjectId(sosId?.toString());
   const session = await mongoose.startSession();
   let created;
   try {
@@ -248,26 +268,27 @@ export function openSseStream(res) {
   res.write(": connected\n\n");
 }
 
-export function subscribeSse(res) {
-  sseState.subscribers.add(res);
+export function subscribeSse(res, validate) {
+  sseState.subscribers.set(res, validate);
   return () => closeSubscriber(res);
 }
 
-export function writeSnapshotToStream(res, rows) {
+export async function writeSnapshotToStream(res, rows) {
   const entry = {
     id: nextSseId(),
     event: "snapshot",
     data: rows
   };
-  writeSseEvent(res, entry);
+  await writeSseEvent(res, entry);
   return entry.id;
 }
 
-export function writeHeartbeat(res) {
+export async function writeHeartbeat(res) {
+  if (!await checkSseAccess(res)) return;
   res.write(": heartbeat\n\n");
 }
 
-export function replaySince(lastEventId, res) {
+export async function replaySince(lastEventId, res) {
   pruneReplayBuffer();
   const oldestId = sseState.buffer.length > 0 ? sseState.buffer[0].id : sseState.nextEventId;
   if (lastEventId < oldestId - 1) {
@@ -275,15 +296,10 @@ export function replaySince(lastEventId, res) {
     return { replayed: 0, missed: true };
   }
 
-  let replayed = 0;
-  for (const entry of sseState.buffer) {
-    if (entry.id > lastEventId) {
-      writeSseEvent(res, entry);
-      replayed += 1;
-    }
-  }
-
-  return { replayed, missed: false };
+  const deliveries = sseState.buffer.filter((entry) => entry.id > lastEventId)
+    .map((entry) => writeSseEvent(res, entry));
+  const delivered = await Promise.all(deliveries);
+  return { replayed: delivered.filter(Boolean).length, missed: false };
 }
 
 export function recordAckMetric() {
@@ -317,12 +333,6 @@ export async function publishSosDeltaBySosId(sosId) {
   sseState.buffer.push(entry);
   pruneReplayBuffer();
 
-  for (const res of sseState.subscribers) {
-    try {
-      writeSseEvent(res, entry);
-    } catch {
-      closeSubscriber(res);
-    }
-  }
+  await Promise.all([...sseState.subscribers.keys()].map((res) => writeSseEvent(res, entry)));
 }
 

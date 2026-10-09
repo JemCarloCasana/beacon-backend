@@ -43,7 +43,7 @@ function stubAdminLookup(t, replacement) {
 }
 
 function adminToken(adminId, role = "admin", expiresIn = "7d") {
-  return jwt.sign({ sub: String(adminId), adminId: String(adminId), role }, JWT_SECRET, { expiresIn });
+  return jwt.sign({ sub: String(adminId), adminId: String(adminId), role, token_version: 0 }, JWT_SECRET, { expiresIn });
 }
 
 test("helmet sets security headers", async () => {
