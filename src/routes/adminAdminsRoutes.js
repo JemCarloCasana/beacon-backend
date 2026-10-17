@@ -1,7 +1,7 @@
 import express from "express";
 import bcrypt from "bcrypt";
 import { getAdminPermissions } from "../middleware/adminAuth.js";
-import { buildValidationError, validateAdminCreatePayload } from "../utils/adminAuthValidation.js";
+import { buildValidationError, validateAdminCreatePayload, validatePermissionsArray, OPS_SUITE_PERMISSIONS } from "../utils/adminAuthValidation.js";
 import { requireAuth, requirePermission } from "../middleware/adminAuth.js"; // ✅ FIXED
 import { mongoose } from "../mongo.js";
 import { auditLog } from "../utils/auditLog.js";
@@ -11,7 +11,7 @@ import { parseObjectId } from "../utils/objectId.js";
 const router = express.Router();
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ADMIN_USER_PATCH_ALLOWED_FIELDS = ["full_name", "email", "status"];
-const ADMIN_ACCOUNT_PATCH_ALLOWED_FIELDS = ["full_name", "email"];
+const ADMIN_ACCOUNT_PATCH_ALLOWED_FIELDS = ["full_name", "email", "permissions"];
 const ACCOUNT_STATUSES = ["active", "deactivated"];
 const ADMIN_LIST_STATUSES = ["active", "deactivated", "all"];
 const IS_DEBUG_LOG = String(process.env.LOG_LEVEL || "").toLowerCase() === "debug";
@@ -209,7 +209,7 @@ function validateAdminAccountPatchPayload(body) {
   }
 
   if (!ADMIN_ACCOUNT_PATCH_ALLOWED_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(payload, field))) {
-    addFieldError(errors, "body", "At least one of full_name or email is required");
+    addFieldError(errors, "body", "At least one of full_name, email, or permissions is required");
   }
 
   if (Object.prototype.hasOwnProperty.call(payload, "full_name")) {
@@ -237,6 +237,18 @@ function validateAdminAccountPatchPayload(body) {
       } else {
         normalized.email = normalizedEmail;
       }
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "permissions")) {
+    const permissionErrors = {};
+    const normalizedPermissions = validatePermissionsArray(payload.permissions, permissionErrors);
+    if (Object.keys(permissionErrors).length > 0) {
+      for (const [key, value] of Object.entries(permissionErrors)) {
+        addFieldError(errors, key, Array.isArray(value) ? value[0] : value);
+      }
+    } else {
+      normalized.permissions = normalizedPermissions;
     }
   }
 
@@ -287,7 +299,7 @@ router.post(
       const passwordHash = await bcrypt.hash(normalized.password, 12);
       const existing = await AdminRecord.findOne({ record_type: "account", email: normalized.email }).lean();
       if (existing) return res.status(409).json({ message: "Email already exists" });
-      const createdAdmin = await AdminRecord.create({ record_type: "account", email: normalized.email, password_hash: passwordHash, full_name: normalized.full_name, role: normalized.role, permissions: [], status: "active", created_at: new Date(), updated_at: new Date() });
+      const createdAdmin = await AdminRecord.create({ record_type: "account", email: normalized.email, password_hash: passwordHash, full_name: normalized.full_name, role: normalized.role, permissions: normalized.permissions ?? (normalized.role === "admin" ? OPS_SUITE_PERMISSIONS : []), status: "active", created_at: new Date(), updated_at: new Date() });
       auditLog({
         action: "admin.account_created",
         actor: req.admin?.adminId,
@@ -442,6 +454,9 @@ router.patch(
       const current = await AdminRecord.findOne({ _id: adminId, record_type: "account" }).lean();
       if (!current) return res.status(404).json({ message: "Admin not found" });
       if (normalized.email && normalized.email !== current.email && await AdminRecord.exists({ record_type: "account", email: normalized.email })) return res.status(409).json({ message: "Email already exists" });
+      if (Object.prototype.hasOwnProperty.call(normalized, "permissions") && req.admin?.adminId === adminId.toString()) {
+        return res.status(403).json({ message: "Cannot modify your own permissions" });
+      }
       const updated = await AdminRecord.findOneAndUpdate({ _id: adminId, record_type: "account" }, { $set: { ...normalized, updated_at: new Date() } }, { returnDocument: "after" }).lean();
       auditLog({ action: "admin.account_updated", actor: req.admin?.adminId, target: updated.email, outcome: "updated", details: { id: updated._id.toString() } });
       return res.json({ id: updated._id.toString(), email: updated.email, full_name: updated.full_name, created_at: updated.created_at });
@@ -585,6 +600,11 @@ router.patch(
         typeof req.body?.note === "string" && req.body.note.trim().length > 0
           ? req.body.note.trim()
           : null;
+      const permissionErrors = {};
+      const requestedPermissions = validatePermissionsArray(req.body?.permissions, permissionErrors);
+      if (Object.keys(permissionErrors).length > 0) {
+        return res.status(422).json(buildValidationError(permissionErrors));
+      }
 
       if (!requestId) {
         return res.status(400).json({ message: "Invalid request id" });
@@ -604,7 +624,7 @@ router.patch(
         await session.withTransaction(async () => {
           const promoted = await AdminRecord.findOneAndUpdate(
             { _id: current.personnel_admin_id, record_type: "account", role: "personnel" },
-            { $set: { role: "admin", role_definition: { name: "admin" }, updated_at: new Date() } },
+            { $set: { role: "admin", role_definition: { name: "admin" }, permissions: requestedPermissions ?? OPS_SUITE_PERMISSIONS, updated_at: new Date() } },
             { returnDocument: "after", session }
           ).lean();
           if (!promoted) throw Object.assign(new Error("Personnel/admin record not found"), { statusCode: 404 });

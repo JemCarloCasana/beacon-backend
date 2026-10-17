@@ -4,6 +4,7 @@ import mongoose from "mongoose";
 
 import router from "../src/routes/adminAdminsRoutes.js";
 import { AdminRecord, Notification } from "../src/models/Reduced.js";
+import { OPS_SUITE_PERMISSIONS } from "../src/utils/adminAuthValidation.js";
 
 function route(path, method) {
   const layer = router.stack.find((entry) => entry.route?.path === path && entry.route.methods?.[method]);
@@ -104,4 +105,105 @@ test("PATCH /admin/admin-requests/:id/reject updates only a pending Mongo reques
   assert.equal(updateFilter.status, "pending");
   assert.equal(res.body.request.status, "rejected");
   assert.equal(res.body.request.personnel_id, personnelId.toString());
+});
+
+test("POST /admin/admins defaults admin-role accounts to the ops permission suite", async (t) => {
+  let createArgs;
+  const id = new mongoose.Types.ObjectId();
+  stub(t, AdminRecord, "findOne", () => lean(null));
+  stub(t, AdminRecord, "create", async (value) => { createArgs = value; return { ...value, _id: id, created_at: new Date("2026-03-22T00:00:00.000Z") }; });
+  const res = response();
+  await route("/admin/admins", "post")({ body: { full_name: "Admin User", email: "Admin@example.com", password: "SecurePass1!", role: "admin" }, admin: { adminId: id.toString() } }, res);
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(createArgs.permissions, OPS_SUITE_PERMISSIONS);
+});
+
+test("POST /admin/admins honors an explicit permissions array", async (t) => {
+  let createArgs;
+  const id = new mongoose.Types.ObjectId();
+  stub(t, AdminRecord, "findOne", () => lean(null));
+  stub(t, AdminRecord, "create", async (value) => { createArgs = value; return { ...value, _id: id, created_at: new Date("2026-03-22T00:00:00.000Z") }; });
+  const res = response();
+  await route("/admin/admins", "post")({ body: { full_name: "Admin User", email: "Admin2@example.com", password: "SecurePass1!", role: "admin", permissions: ["manage_sos", "view_incidents"] }, admin: { adminId: id.toString() } }, res);
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(createArgs.permissions, ["manage_sos", "view_incidents"]);
+});
+
+test("POST /admin/admins rejects unknown permissions", async (t) => {
+  const id = new mongoose.Types.ObjectId();
+  stub(t, AdminRecord, "findOne", () => lean(null));
+  const res = response();
+  await route("/admin/admins", "post")({ body: { full_name: "Admin User", email: "Admin3@example.com", password: "SecurePass1!", role: "admin", permissions: ["nope"] }, admin: { adminId: id.toString() } }, res);
+  assert.equal(res.statusCode, 422);
+});
+
+test("PATCH /admin/admins/:id updates permissions", async (t) => {
+  const id = new mongoose.Types.ObjectId();
+  const current = { _id: id, email: "old@example.com", full_name: "Old Name", role: "admin", created_at: "2026-01-01" };
+  let update;
+  stub(t, AdminRecord, "findOne", () => lean(current));
+  stub(t, AdminRecord, "exists", async () => false);
+  stub(t, AdminRecord, "findOneAndUpdate", (_filter, value) => { update = value; return lean({ ...current, ...value.$set }); });
+  const res = response();
+  await route("/admin/admins/:id", "patch")({ params: { id: id.toString() }, body: { permissions: ["manage_sos", "view_incidents"] }, admin: { adminId: "other-admin-id" } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(update.$set.permissions, ["manage_sos", "view_incidents"]);
+});
+
+test("PATCH /admin/admins/:id cannot change your own permissions", async (t) => {
+  const id = new mongoose.Types.ObjectId();
+  const current = { _id: id, email: "old@example.com", full_name: "Old Name", role: "admin", created_at: "2026-01-01" };
+  stub(t, AdminRecord, "findOne", () => lean(current));
+  const res = response();
+  await route("/admin/admins/:id", "patch")({ params: { id: id.toString() }, body: { permissions: ["manage_sos"] }, admin: { adminId: id.toString() } }, res);
+  assert.equal(res.statusCode, 403);
+});
+
+test("PATCH /admin/admins/:id rejects unknown permissions", async (t) => {
+  const id = new mongoose.Types.ObjectId();
+  const current = { _id: id, email: "old@example.com", full_name: "Old Name", role: "admin", created_at: "2026-01-01" };
+  stub(t, AdminRecord, "findOne", () => lean(current));
+  const res = response();
+  await route("/admin/admins/:id", "patch")({ params: { id: id.toString() }, body: { permissions: ["nope"] }, admin: { adminId: "other-admin-id" } }, res);
+  assert.equal(res.statusCode, 422);
+});
+
+test("PATCH /admin/admin-requests/:id/accept grants the ops suite by default", async (t) => {
+  const originalSession = mongoose.startSession;
+  t.after(() => { mongoose.startSession = originalSession; });
+  const session = { withTransaction: async (cb) => cb(), endSession: async () => {} };
+  mongoose.startSession = async () => session;
+  const requestId = new mongoose.Types.ObjectId();
+  const personnelId = new mongoose.Types.ObjectId();
+  const current = { _id: requestId, personnel_admin_id: personnelId, status: "pending" };
+  let promotedUpdate;
+  stub(t, AdminRecord, "findOne", () => lean(current));
+  stub(t, AdminRecord, "findOneAndUpdate", (filter, value) => {
+    if (filter?.role === "personnel") { promotedUpdate = value; return lean({ _id: personnelId, ...value.$set }); }
+    return lean({ _id: requestId, personnel_admin_id: personnelId, status: "approved" });
+  });
+  const res = response();
+  await route("/admin/admin-requests/:id/accept", "patch")({ params: { id: requestId.toString() }, body: {}, admin: { adminId: personnelId.toString() } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(promotedUpdate.$set.permissions, OPS_SUITE_PERMISSIONS);
+});
+
+test("PATCH /admin/admin-requests/:id/accept honors provided permissions", async (t) => {
+  const originalSession = mongoose.startSession;
+  t.after(() => { mongoose.startSession = originalSession; });
+  const session = { withTransaction: async (cb) => cb(), endSession: async () => {} };
+  mongoose.startSession = async () => session;
+  const requestId = new mongoose.Types.ObjectId();
+  const personnelId = new mongoose.Types.ObjectId();
+  const current = { _id: requestId, personnel_admin_id: personnelId, status: "pending" };
+  let promotedUpdate;
+  stub(t, AdminRecord, "findOne", () => lean(current));
+  stub(t, AdminRecord, "findOneAndUpdate", (filter, value) => {
+    if (filter?.role === "personnel") { promotedUpdate = value; return lean({ _id: personnelId, ...value.$set }); }
+    return lean({ _id: requestId, personnel_admin_id: personnelId, status: "approved" });
+  });
+  const res = response();
+  await route("/admin/admin-requests/:id/accept", "patch")({ params: { id: requestId.toString() }, body: { permissions: ["manage_reports"] }, admin: { adminId: personnelId.toString() } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(promotedUpdate.$set.permissions, ["manage_reports"]);
 });

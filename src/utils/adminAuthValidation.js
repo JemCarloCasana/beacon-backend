@@ -2,6 +2,26 @@ const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FULL_NAME_REGEX = /^[\p{L} .'-]+$/u;
 const ADMIN_CREATION_ROLES = ["admin", "personnel"];
 
+export const ADMIN_PERMISSION_CATALOG = [
+  "manage_users",
+  "manage_admins",
+  "manage_broadcasts",
+  "view_broadcasts",
+  "view_incidents",
+  "manage_incidents",
+  "manage_sos",
+  "manage_reports",
+];
+
+export const OPS_SUITE_PERMISSIONS = [
+  "manage_sos",
+  "view_incidents",
+  "manage_incidents",
+  "manage_reports",
+  "view_broadcasts",
+  "manage_broadcasts",
+];
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -58,6 +78,27 @@ function validateLoginPayload(payload) {
   return { errors, normalized };
 }
 
+function validatePermissionsArray(value, errors, field = "permissions") {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    errors[field] = "Must be an array";
+    return undefined;
+  }
+  const normalized = [];
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== "string" || !ADMIN_PERMISSION_CATALOG.includes(item)) {
+      errors[field] = `Unknown permission: ${String(item)}`;
+      return undefined;
+    }
+    if (!seen.has(item)) {
+      seen.add(item);
+      normalized.push(item);
+    }
+  }
+  return normalized;
+}
+
 function validateAdminCreatePayload(payload) {
   const body = payload && typeof payload === "object" ? payload : {};
   const errors = {};
@@ -110,12 +151,20 @@ function validateAdminCreatePayload(payload) {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(body, "permissions")) {
+    const permissions = validatePermissionsArray(body.permissions, errors);
+    if (permissions !== undefined && !errors.permissions) {
+      normalized.permissions = permissions;
+    }
+  }
+
   return { errors, normalized };
 }
 
 export {
   ADMIN_CREATION_ROLES,
   validateAdminCreatePayload,
+  validatePermissionsArray,
   buildValidationError,
   validateLoginPayload
 };
