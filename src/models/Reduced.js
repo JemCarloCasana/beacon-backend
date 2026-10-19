@@ -103,6 +103,10 @@ const sosRecordSchema = new Schema({
 sosRecordSchema.index({ record_type: 1, latest_status: 1, updated_at: -1 });
 sosRecordSchema.index({ record_type: 1, thread_id: 1, created_at: -1 });
 sosRecordSchema.index({ record_type: 1, sos_id: 1, created_at: -1 });
+sosRecordSchema.index(
+  { user_id: 1 },
+  { unique: true, partialFilterExpression: { record_type: "case", latest_status: "active" }, name: "unique_active_case_per_user" }
+);
 
 const evidenceSchema = new Schema({
   image_url: String,

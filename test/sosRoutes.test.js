@@ -79,3 +79,56 @@ test("existing SOS can close after leaving Dagupan and retains its real last loc
   assert.equal(created.longitude, lastLocation.longitude);
   assert.equal(created.status, "safe");
 });
+
+test("POST /sos reuses the existing active case for the same user", async (t) => {
+  const userId = new mongoose.Types.ObjectId();
+  const existingSos = new mongoose.Types.ObjectId();
+  stub(t, UserProfile, "findOne", async () => ({ _id: userId, full_name: "Alex" }));
+  stub(t, SosRecord, "findOne", () => ({ lean: async () => ({ root_event_id: existingSos, emergency_category: "fire" }) }));
+  let created = 0;
+  stub(t, SosRecord, "create", async () => { created += 1; });
+  const res = response();
+  await handler("/sos", "post")({ auth: { uid: "uid-10" }, body: { category: "medical", latitude: 16.0435, longitude: 120.3354 } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sos_id, existingSos.toString());
+  assert.equal(res.body.category, "fire");
+  assert.equal(res.body.already_active, true);
+  assert.equal(created, 0);
+});
+
+test("POST /sos returns the existing case when a concurrent insert trips the unique index", async (t) => {
+  const userId = new mongoose.Types.ObjectId();
+  const existingSos = new mongoose.Types.ObjectId();
+  const originalSession = mongoose.startSession;
+  const session = { withTransaction: async (callback) => callback(), endSession: async () => {} };
+  mongoose.startSession = async () => session;
+  t.after(() => { mongoose.startSession = originalSession; });
+  stub(t, UserProfile, "findOne", async () => ({ _id: userId, full_name: "Alex" }));
+  let findOneCalls = 0;
+  stub(t, SosRecord, "findOne", () => ({ lean: async () => (++findOneCalls === 1 ? null : { root_event_id: existingSos, emergency_category: "medical" }) }));
+  let createCalls = 0;
+  stub(t, SosRecord, "create", async (docs) => { createCalls += 1; if (createCalls === 2) throw Object.assign(new Error("E11000"), { code: 11000 }); return docs; });
+  const res = response();
+  await handler("/sos", "post")({ auth: { uid: "uid-10" }, body: { category: "medical", latitude: 16.0435, longitude: 120.3354 } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sos_id, existingSos.toString());
+  assert.equal(res.body.already_active, true);
+});
+
+test("POST /sos reports success when fan-out fails after commit", async (t) => {
+  const userId = new mongoose.Types.ObjectId();
+  const originalSession = mongoose.startSession;
+  const session = { withTransaction: async (callback) => callback(), endSession: async () => {} };
+  mongoose.startSession = async () => session;
+  t.after(() => { mongoose.startSession = originalSession; });
+  stub(t, UserProfile, "findOne", async () => ({ _id: userId, full_name: "Alex" }));
+  stub(t, SosRecord, "findOne", () => ({ lean: async () => null }));
+  stub(t, SosRecord, "create", async (docs) => docs);
+  stub(t, AdminRecord, "find", () => ({ select: () => ({ lean: async () => [] }) }));
+  stub(t, FriendConnection, "find", () => { throw new Error("mongo down"); });
+  const res = response();
+  await handler("/sos", "post")({ auth: { uid: "uid-10" }, body: { category: "medical", latitude: 16.0435, longitude: 120.3354 } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body.sos_id, /^[a-f\d]{24}$/i);
+  assert.equal(res.body.message, "SOS created, but some notifications could not be sent.");
+});
