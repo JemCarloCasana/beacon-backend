@@ -207,3 +207,18 @@ test("PATCH /admin/admin-requests/:id/accept honors provided permissions", async
   assert.equal(res.statusCode, 200);
   assert.deepEqual(promotedUpdate.$set.permissions, ["manage_reports"]);
 });
+
+test("GET /admin/notifications returns string target ids even for numeric-looking ObjectIds", async (t) => {
+  const adminId = new mongoose.Types.ObjectId();
+  const numericHex = "123456789012345678901234";
+  stub(t, AdminRecord, "findOne", () => ({ select: () => ({ lean: async () => ({ permissions: ["manage_sos", "view_incidents"] }) }) }));
+  stub(t, Notification, "find", () => ({
+    sort: () => ({ lean: async () => [{ _id: new mongoose.Types.ObjectId(), recipient_id: adminId, type: "sos", title: "SOS", message: "New SOS", metadata: { admin_request_id: "56", sos_id: numericHex }, is_read: false, created_at: "2026-01-01" }] }),
+  }));
+  const res = response();
+  await route("/admin/notifications", "get")({ admin: { adminId: adminId.toString() } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body[0].metadata.admin_request_id, "56");
+  assert.equal(res.body[0].metadata.sos_id, numericHex);
+  assert.equal(res.body[0].metadata.fallback_route, `/admin/sos/${numericHex}`);
+});

@@ -51,26 +51,24 @@ function normalizeNotificationMetadata(metadata) {
   return { ...normalized };
 }
 
-function toPositiveIntegerOrNull(value) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return null;
-  }
-  return parsed;
+function toNotificationIdString(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
 }
 
 function withNormalizedNotificationTargets(metadata, type) {
   const normalized = {
     ...metadata,
   };
-  const adminRequestId = toPositiveIntegerOrNull(normalized.admin_request_id);
+  const adminRequestId = toNotificationIdString(normalized.admin_request_id);
   if (adminRequestId != null) {
     normalized.admin_request_id = adminRequestId;
   }
 
-  const incidentId = toPositiveIntegerOrNull(normalized.incident_id);
-  const sosId = toPositiveIntegerOrNull(normalized.sos_id);
-  const referenceId = toPositiveIntegerOrNull(normalized.reference_id);
+  const incidentId = toNotificationIdString(normalized.incident_id);
+  const sosId = toNotificationIdString(normalized.sos_id);
+  const referenceId = toNotificationIdString(normalized.reference_id);
   if (incidentId != null) {
     normalized.incident_id = incidentId;
   }
