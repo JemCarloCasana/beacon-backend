@@ -135,6 +135,21 @@ test("POST /sos reports success when fan-out fails after commit", async (t) => {
   assert.equal(res.body.message, "SOS created, but some notifications could not be sent.");
 });
 
+test("POST /sos asks for a retry when the concurrent insert races a vanished active case", async (t) => {
+  const userId = new mongoose.Types.ObjectId();
+  const originalSession = mongoose.startSession;
+  const session = { withTransaction: async (callback) => callback(), endSession: async () => {} };
+  mongoose.startSession = async () => session;
+  t.after(() => { mongoose.startSession = originalSession; });
+  stub(t, UserProfile, "findOne", async () => ({ _id: userId, full_name: "Alex" }));
+  stub(t, SosRecord, "findOne", () => ({ lean: async () => null }));
+  let createCalls = 0;
+  stub(t, SosRecord, "create", async (docs) => { createCalls += 1; if (createCalls === 2) throw Object.assign(new Error("E11000"), { code: 11000 }); return docs; });
+  const res = response();
+  await handler("/sos", "post")({ auth: { uid: "uid-10" }, body: { category: "medical", latitude: 16.0435, longitude: 120.3354 } }, res);
+  assert.equal(res.statusCode, 503);
+});
+
 test("owner close notifies friends with the terminal outcome", async (t) => {
   const userId = new mongoose.Types.ObjectId();
   const friendId = new mongoose.Types.ObjectId();

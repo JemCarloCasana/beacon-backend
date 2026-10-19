@@ -209,7 +209,8 @@ router.post("/sos", requireAppAuth, async (req, res) => {
   } catch (err) {
     if (err?.code === 11000) {
       const concurrent = await findActiveSosCase(userId);
-      return res.status(200).json(activeSosPayload(concurrent ?? { root_event_id: eventId, emergency_category: normalizedCategory }, normalizedCategory));
+      if (concurrent) return res.status(200).json(activeSosPayload(concurrent, normalizedCategory));
+      return res.status(503).json({ message: "SOS state is still finalizing. Please retry." });
     }
     console.error("Create Mongo SOS event error:", err);
     return res.status(500).json({ message: "Failed to create SOS event" });
