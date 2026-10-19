@@ -109,3 +109,16 @@ test("PATCH /notifications/:id/read scopes the ObjectId update to the current re
   assert.equal(res.body.notification.id, notificationId.toString());
   assert.equal(res.body.notification.is_read, true);
 });
+
+test("notifyUserLifecycleEvent returns a soft failure instead of throwing when the recipient lookup fails", async (t) => {
+  stub(t, UserProfile, "findById", () => ({ select: () => ({ lean: async () => { throw new Error("db down"); } }) }));
+  const result = await notifyUserLifecycleEvent({ recipient_user_id: recipientId.toString(), entity_type: "incident", entity_id: entityId.toString(), status: "dispatched", assigned_department: "Fire" });
+  assert.deepEqual(result, { ok: false, error: "notification_failed" });
+});
+
+test("notifyUserLifecycleEvent returns a soft failure instead of throwing when the notification insert fails", async (t) => {
+  stub(t, UserProfile, "findById", () => ({ select: () => ({ lean: async () => ({ status: "active" }) }) }));
+  stub(t, Notification, "create", async () => { throw new Error("write conflict"); });
+  const result = await notifyUserLifecycleEvent({ recipient_user_id: recipientId.toString(), entity_type: "sos", entity_id: entityId.toString(), status: "safe" });
+  assert.deepEqual(result, { ok: false, error: "notification_failed" });
+});

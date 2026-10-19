@@ -440,7 +440,7 @@ router.patch(
         const result = await IncidentReport.updateOne({ _id: incidentId, status: current.status }, { $set: set });
         if (result.matchedCount !== 1) return res.status(409).json({ message: "Incident changed; refresh and retry" });
         const updated = await getIncidentById(incidentId);
-        if (shouldNotifySender) notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "incident", entity_id: incidentId, status: effectiveStatus, assigned_department: updated?.assigned_department ?? current.assigned_department ?? null, trace });
+        if (shouldNotifySender) notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "incident", entity_id: incidentId, status: effectiveStatus, assigned_department: updated?.assigned_department ?? current.assigned_department ?? null, trace }).catch(() => {});
         return res.json(toIncidentDto(updated, { isAdminRoute: true }));
       }
 

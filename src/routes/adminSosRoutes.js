@@ -216,7 +216,7 @@ router.post("/admin/sos/:sosId/acknowledge", requireAdminAuth, requirePermission
       const current = await getThreadStateAnyStatus(sosId);
       if (!current) return res.status(500).json({ message: "SOS thread state unavailable after acknowledge" });
       publishSosDeltaBySosId(sosId).catch(() => {});
-      notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "sos", entity_id: current.sos_id, status: "acknowledged", assigned_unit: current.assigned_unit, sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace });
+      notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "sos", entity_id: current.sos_id, status: "acknowledged", assigned_unit: current.assigned_unit, sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace }).catch(() => {});
       return res.json(buildActionResponse(current));
     } catch (err) { if (err?.statusCode) return res.status(err.statusCode).json({ message: "SOS thread is already resolved" }); console.error("Mongo SOS acknowledge error:", err); return res.status(500).json({ message: "Server error" }); }
   }
@@ -258,8 +258,8 @@ router.post("/admin/sos/:sosId/resolve", requireAdminAuth, requirePermission("ma
       const current = await getThreadStateAnyStatus(sosId);
       if (!current) return res.status(500).json({ message: "SOS thread state unavailable after resolve" });
       publishSosDeltaBySosId(sosId).catch(() => {});
-      notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "sos", entity_id: current.sos_id, status: current.terminal_status ?? "resolved", assigned_unit: current.assigned_unit, sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace });
-      notifySosFriendsTerminalEvent({ owner_user_id: current.user_id, sos_id: current.sos_id, terminal_outcome: current.terminal_status ?? "resolved", sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace });
+      notifyUserLifecycleEvent({ recipient_user_id: current.user_id, entity_type: "sos", entity_id: current.sos_id, status: current.terminal_status ?? "resolved", assigned_unit: current.assigned_unit, sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace }).catch(() => {});
+      notifySosFriendsTerminalEvent({ owner_user_id: current.user_id, sos_id: current.sos_id, terminal_outcome: current.terminal_status ?? "resolved", sender_name: current.full_name, latitude: current.latest_latitude, longitude: current.latest_longitude, address: current.latest_address, category: current.emergency_category, trace }).catch(() => {});
       return res.json(buildActionResponse(current));
     } catch (err) { if (err?.statusCode) return res.status(err.statusCode).json({ message: "SOS thread status changed; reload and retry" }); console.error("Mongo SOS resolve error:", err); return res.status(500).json({ message: "Server error" }); }
   }

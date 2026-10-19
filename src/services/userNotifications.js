@@ -373,63 +373,85 @@ export async function notifyUserLifecycleEvent(input) {
 
   logNotificationTrace("start", resolvedTrace);
 
-  const recipient = await UserProfile.findById(built.recipientUserId).select({ status: 1 }).lean();
-  if (!recipient || recipient.status === "deactivated") return { ok: true, skipped: true, reason: "inactive_recipient" };
-
-  const created = await Notification.create({
-    record_type: "user",
-    recipient_type: "user",
-    recipient_id: parseObjectId(built.recipientUserId),
-    type: built.type,
-    title: built.title,
-    message: built.message,
-    source: built.type === "incident_update"
-      ? { type: "incident_report", id: parseObjectId(built.metadata.incident_id) }
-      : { type: "sos_record", id: parseObjectId(built.metadata.sos_id) },
-    metadata: built.metadata,
-    is_read: false,
-    created_at: new Date(),
-  });
-
-  const inserted = normalizeUserNotificationRow(
-    toUserNotificationRow(
-      typeof created.toObject === "function" ? created.toObject() : created
-    )
-  );
-  inserted.metadata = {
-    ...inserted.metadata,
-    created_at: toIso(inserted.created_at),
-  };
-
-  logNotificationTrace("notification_inserted", {
-    ...resolvedTrace,
-    notificationId: inserted.id,
-  });
-
-  let tokens = [];
   try {
-    const profile = await UserProfile.findById(built.recipientUserId).select({ devices: 1 }).lean();
-    tokens = (profile?.devices ?? []).filter((device) => device.is_active).map((device) => device.fcm_token).filter(Boolean);
-  } catch (err) {
-    console.error("[user-notifications] failed to load device tokens:", err?.message || err, {
+
+    const recipient = await UserProfile.findById(built.recipientUserId).select({ status: 1 }).lean();
+    if (!recipient || recipient.status === "deactivated") return { ok: true, skipped: true, reason: "inactive_recipient" };
+
+    const created = await Notification.create({
+      record_type: "user",
+      recipient_type: "user",
+      recipient_id: parseObjectId(built.recipientUserId),
+      type: built.type,
+      title: built.title,
+      message: built.message,
+      source: built.type === "incident_update"
+        ? { type: "incident_report", id: parseObjectId(built.metadata.incident_id) }
+        : { type: "sos_record", id: parseObjectId(built.metadata.sos_id) },
+      metadata: built.metadata,
+      is_read: false,
+      created_at: new Date(),
+    });
+
+    const inserted = normalizeUserNotificationRow(
+      toUserNotificationRow(
+        typeof created.toObject === "function" ? created.toObject() : created
+      )
+    );
+    inserted.metadata = {
+      ...inserted.metadata,
+      created_at: toIso(inserted.created_at),
+    };
+
+    logNotificationTrace("notification_inserted", {
       ...resolvedTrace,
-      recipientUserId: built.recipientUserId,
       notificationId: inserted.id,
     });
-    return {
-      ok: true,
-      notification: inserted,
-      push: { attempted: false, error: "token_lookup_failed" },
-    };
-  }
 
-  logNotificationTrace("device_tokens_loaded", {
-    ...resolvedTrace,
-    notificationId: inserted.id,
-    tokenCount: tokens.length,
-  });
+    let tokens = [];
+    try {
+      const profile = await UserProfile.findById(built.recipientUserId).select({ devices: 1 }).lean();
+      tokens = (profile?.devices ?? []).filter((device) => device.is_active).map((device) => device.fcm_token).filter(Boolean);
+    } catch (err) {
+      console.error("[user-notifications] failed to load device tokens:", err?.message || err, {
+        ...resolvedTrace,
+        recipientUserId: built.recipientUserId,
+        notificationId: inserted.id,
+      });
+      return {
+        ok: true,
+        notification: inserted,
+        push: { attempted: false, error: "token_lookup_failed" },
+      };
+    }
 
-  if (tokens.length === 0) {
+    logNotificationTrace("device_tokens_loaded", {
+      ...resolvedTrace,
+      notificationId: inserted.id,
+      tokenCount: tokens.length,
+    });
+
+    if (tokens.length === 0) {
+      const pushResult = await sendMulticastWithCleanup({
+        tokens,
+        title: built.title,
+        body: built.message,
+        data: {
+          ...built.data,
+          created_at: inserted.metadata.created_at,
+        },
+        trace: {
+          ...resolvedTrace,
+          notificationId: inserted.id,
+        },
+      });
+      return {
+        ok: true,
+        notification: inserted,
+        push: pushResult.push,
+      };
+    }
+
     const pushResult = await sendMulticastWithCleanup({
       tokens,
       title: built.title,
@@ -441,35 +463,19 @@ export async function notifyUserLifecycleEvent(input) {
       trace: {
         ...resolvedTrace,
         notificationId: inserted.id,
+        type: built.type,
       },
     });
+
     return {
       ok: true,
       notification: inserted,
       push: pushResult.push,
     };
+  } catch (err) {
+    console.error("[user-notifications] notifyUserLifecycleEvent failed:", err?.message || err, { ...resolvedTrace });
+    return { ok: false, error: "notification_failed" };
   }
-
-  const pushResult = await sendMulticastWithCleanup({
-    tokens,
-    title: built.title,
-    body: built.message,
-    data: {
-      ...built.data,
-      created_at: inserted.metadata.created_at,
-    },
-    trace: {
-      ...resolvedTrace,
-      notificationId: inserted.id,
-      type: built.type,
-    },
-  });
-
-  return {
-    ok: true,
-    notification: inserted,
-    push: pushResult.push,
-  };
 }
 
 export async function notifySosFriendsTerminalEvent(input) {
