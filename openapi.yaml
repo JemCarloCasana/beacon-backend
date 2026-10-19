@@ -129,11 +129,15 @@ paths:
   /users/{id}/public:
     get:
       summary: Public user profile
+      security:
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/PathId"
       responses:
         "200":
           description: Public profile
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
 
