@@ -1,8 +1,17 @@
-const store = new Map();
-
 function pruneOld(now, windowMs, entries) {
   const cutoff = now - windowMs;
   return entries.filter((value) => value > cutoff);
+}
+
+export function sweepStore(store, now, windowMs) {
+  for (const [key, entries] of store) {
+    const recent = pruneOld(now, windowMs, entries);
+    if (recent.length === 0) {
+      store.delete(key);
+    } else {
+      store.set(key, recent);
+    }
+  }
 }
 
 export function createRateLimiter({ windowMs, max, keyPrefix, message }) {
@@ -15,10 +24,18 @@ export function createRateLimiter({ windowMs, max, keyPrefix, message }) {
 
   const responseMessage = message || "Too many requests. Please try again later.";
   const prefix = keyPrefix || "rate_limit";
+  const store = new Map();
+  let lastSweep = 0;
 
   return function rateLimiter(req, res, next) {
     const now = Date.now();
-    const key = `${prefix}:${req.ip || "unknown"}:${req.path}`;
+
+    if (now - lastSweep >= windowMs) {
+      lastSweep = now;
+      sweepStore(store, now, windowMs);
+    }
+
+    const key = `${prefix}:${req.ip || "unknown"}`;
     const existing = store.get(key) || [];
     const recent = pruneOld(now, windowMs, existing);
 
