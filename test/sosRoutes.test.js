@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import router from "../src/routes/sosRoutes.js";
 import { mongoose } from "../src/mongo.js";
 import { AdminRecord, FriendConnection, ReducedUserProfile as UserProfile, SosRecord } from "../src/models/Reduced.js";
+import { setUserNotificationMulticastSenderForTests } from "../src/services/userNotifications.js";
 
 function handler(path, method) {
   const layer = router.stack.find((entry) => entry.route?.path === path && entry.route.methods?.[method]);
@@ -60,6 +61,7 @@ test("existing SOS can close after leaving Dagupan and retains its real last loc
   const session = { withTransaction: async callback => callback(), endSession: async () => {} };
   stub(t, mongoose, "startSession", async () => session);
   stub(t, UserProfile, "findOne", async () => ({ _id: userId }));
+  stub(t, FriendConnection, "find", () => ({ lean: async () => [] }));
   let caseReads = 0;
   stub(t, SosRecord, "findOne", filter => {
     const value = filter.record_type === "case" ? (++caseReads === 1 ? thread : null) : lastLocation;
@@ -131,4 +133,30 @@ test("POST /sos reports success when fan-out fails after commit", async (t) => {
   assert.equal(res.statusCode, 200);
   assert.match(res.body.sos_id, /^[a-f\d]{24}$/i);
   assert.equal(res.body.message, "SOS created, but some notifications could not be sent.");
+});
+
+test("owner close notifies friends with the terminal outcome", async (t) => {
+  const userId = new mongoose.Types.ObjectId();
+  const friendId = new mongoose.Types.ObjectId();
+  const sosId = new mongoose.Types.ObjectId();
+  const thread = { _id: new mongoose.Types.ObjectId(), user_id: userId, root_event_id: sosId, latest_status: "active", emergency_category: "medical", latitude: 16, longitude: 120, address: "Downtown" };
+  const session = { withTransaction: async (callback) => callback(), endSession: async () => {} };
+  stub(t, mongoose, "startSession", async () => session);
+  stub(t, UserProfile, "findOne", async () => ({ _id: userId, full_name: "Alex User" }));
+  stub(t, UserProfile, "find", () => ({ select: () => ({ lean: async () => [{ devices: [{ fcm_token: "friend-token", is_active: true }] }] }) }));
+  stub(t, SosRecord, "findOne", () => ({ lean: async () => thread, sort() { return this; }, session() { return this; } }));
+  stub(t, SosRecord, "updateOne", async () => ({ modifiedCount: 1 }));
+  stub(t, SosRecord, "create", async (docs) => docs);
+  stub(t, FriendConnection, "find", () => ({ lean: async () => [{ user_ids: [userId, friendId] }] }));
+  const sent = [];
+  t.after(() => setUserNotificationMulticastSenderForTests(null));
+  setUserNotificationMulticastSenderForTests(async (message) => { sent.push(message); return { successCount: message.tokens.length, failureCount: 0, responses: message.tokens.map(() => ({ success: true })) }; });
+  const res = response();
+  await handler("/sos/:sosId/status", "patch")({ params: { sosId: sosId.toString() }, body: { status: "safe" }, auth: { uid: "uid-10" } }, res);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(res.statusCode, 200);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].data.sos_id, sosId.toString());
+  assert.equal(sent[0].data.status, "safe");
+  assert.match(sent[0].notification.body, /Alex User/);
 });

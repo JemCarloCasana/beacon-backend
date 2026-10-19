@@ -9,6 +9,7 @@ import { parseObjectId } from "../utils/objectId.js";
 import { getServiceAreaError } from "../utils/serviceArea.js";
 import { getThreadStateAnyStatus, listLiveThreads, parseLiveListParams } from "../services/sosLiveOps.js";
 import { recordSosLocation } from "../services/sosLocationHistory.js";
+import { notifySosFriendsTerminalEvent } from "../services/userNotifications.js";
 
 const router = express.Router();
 const SOS_CATEGORIES = new Set(["medical", "fire", "violence", "unknown"]);
@@ -279,6 +280,16 @@ router.patch("/sos/:sosId/status", requireAppAuth, async (req, res) => {
       throw err;
     }
     publishSosDeltaBySosId(sosId).catch(() => {});
+    notifySosFriendsTerminalEvent({
+      owner_user_id: userId,
+      sos_id: sosId,
+      terminal_outcome: status,
+      sender_name: mongoUser.full_name,
+      latitude: thread.latitude,
+      longitude: thread.longitude,
+      address: thread.address,
+      category: thread.emergency_category,
+    }).catch(() => {});
     return res.status(200).json({ sos_id: sosId.toString(), status, resolved_at: resolvedAt });
   }
 });
