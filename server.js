@@ -98,11 +98,22 @@ app.options(/.*/, cors(corsOptions));
 // JSON parser
 app.use(express.json({ limit: "2mb" }));
 
-// Malformed JSON fails safely with 400 instead of falling through to 500
+// Body parser errors fail safely instead of falling through to 500
 app.use((err, req, res, next) => {
-  if (err && (err.type === "entity.parse.failed" || err instanceof SyntaxError) && err.status === 400) {
+  if (!err) return next(err);
+
+  if (err.type === "entity.parse.failed" || (err instanceof SyntaxError && err.status === 400)) {
     return res.status(400).json({ message: "Invalid JSON body" });
   }
+
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ message: "Payload too large" });
+  }
+
+  if (err.type === "encoding.unsupported" || err.type === "charset.unsupported") {
+    return res.status(415).json({ message: "Unsupported media type" });
+  }
+
   return next(err);
 });
 

@@ -129,15 +129,16 @@ test("admin with manage_broadcasts passes the permission gate", async () => {
 });
 
 test("write limiter returns 429 after the test-tuned max", async () => {
+  const limiterHeaders = { "X-Forwarded-For": "203.0.113.42" };
   const statuses = [];
   for (let i = 0; i < 4; i++) {
-    const res = await fetch(`${baseUrl}/admin/broadcasts/7/send`, { method: "POST" });
+    const res = await fetch(`${baseUrl}/admin/broadcasts/7/send`, { method: "POST", headers: limiterHeaders });
     statuses.push(res.status);
     await res.text().catch(() => {});
   }
   assert.deepEqual(statuses.slice(0, 3), [401, 401, 401]);
   assert.equal(statuses[3], 429);
-  const limited = await fetch(`${baseUrl}/admin/broadcasts/7/send`, { method: "POST" });
+  const limited = await fetch(`${baseUrl}/admin/broadcasts/7/send`, { method: "POST", headers: limiterHeaders });
   assert.equal(limited.status, 429);
   assert.deepEqual(await limited.json(), {
     message: "Too many write requests. Please retry shortly.",
@@ -209,4 +210,24 @@ test("failed admin login emits a sanitized audit line", async (t) => {
   assert.equal(auditLines[0].audit.outcome, "invalid_credentials");
   assert.equal(auditLines[0].audit.target, "nobody@beacon.test");
   assert.ok(!/Wrong-Pass/.test(lines.join("\n")), "password never logged");
+});
+
+test("oversized JSON bodies fail with 413 instead of 500", async () => {
+  const res = await fetch(`${baseUrl}/admin/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "a@b.co", password: "x".repeat(2_200_000) }),
+  });
+  assert.equal(res.status, 413);
+  assert.deepEqual(await res.json(), { message: "Payload too large" });
+});
+
+test("unsupported content encodings fail with 415 instead of 500", async () => {
+  const res = await fetch(`${baseUrl}/admin/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Content-Encoding": "compress" },
+    body: "{}",
+  });
+  assert.equal(res.status, 415);
+  assert.deepEqual(await res.json(), { message: "Unsupported media type" });
 });
