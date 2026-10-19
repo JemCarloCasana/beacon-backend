@@ -66,6 +66,7 @@ const friendConnectionSchema = new Schema({
   user_ids: { type: [Schema.Types.ObjectId], required: true, validate: (ids) => ids.length === 2 },
   requested_by: Schema.Types.ObjectId,
   recipient: Schema.Types.ObjectId,
+  pair_key: { type: String },
   status: { type: String, enum: ["pending", "accepted", "declined", "cancelled"] },
   created_at: timestamp,
   updated_at: timestamp,
@@ -73,6 +74,10 @@ const friendConnectionSchema = new Schema({
 }, { collection: "friend_connections", versionKey: false });
 friendConnectionSchema.index({ user_ids: 1, record_type: 1, status: 1, created_at: -1 });
 friendConnectionSchema.index({ requested_by: 1, status: 1, created_at: -1 });
+friendConnectionSchema.index(
+  { pair_key: 1 },
+  { unique: true, partialFilterExpression: { pair_key: { $exists: true }, record_type: "request", status: "pending" }, name: "unique_pending_request_pair" }
+);
 
 const sosRecordSchema = new Schema({
   record_type: { type: String, enum: ["case", "event"], required: true },

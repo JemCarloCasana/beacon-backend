@@ -30,6 +30,7 @@ async function createMongoFriendRequest(res, currentUserId, targetId) {
   try {
     const request = await FriendConnection.create({
       record_type: "request", user_ids: [pairState.lowUserId, pairState.highUserId],
+      pair_key: `${pairState.lowUserId.toString()}:${pairState.highUserId.toString()}`,
       requested_by: currentUserId, recipient: targetId, status: "pending",
     });
     return res.status(201).json({ id: request._id.toString(), requester_user_id: currentUserId.toString(), addressee_user_id: targetId.toString(), status: request.status, created_at: request.created_at });

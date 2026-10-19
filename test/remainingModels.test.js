@@ -48,6 +48,7 @@ test("reduced collections define their relationship and lookup indexes", () => {
   assert.ok(ReducedUserProfile.schema.indexes().some(([fields, options]) => fields.email === 1 && options.unique));
   assert.ok(AdminRecord.schema.indexes().some(([fields, options]) => fields.email === 1 && options.unique));
   assert.ok(FriendConnection.schema.indexes().some(([fields]) => fields.user_ids === 1));
+  assert.ok(FriendConnection.schema.indexes().some(([fields, options]) => fields.pair_key === 1 && options.unique === true && options.partialFilterExpression?.status === "pending"));
   assert.ok(SosRecord.schema.indexes().some(([fields]) => fields.thread_id === 1));
   assert.ok(SosRecord.schema.indexes().some(([fields, options]) => fields.user_id === 1 && options.unique === true && options.partialFilterExpression?.record_type === "case" && options.partialFilterExpression?.latest_status === "active"));
   assert.ok(ReducedIncidentReport.schema.indexes().some(([fields]) => fields.status === 1));

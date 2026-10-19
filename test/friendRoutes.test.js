@@ -106,3 +106,31 @@ test("GET /friends resolves friendship records to sorted profiles", async (t) =>
   await handler("/friends", "get")({ auth: { uid: "uid-10" } }, res);
   assert.deepEqual(res.body.map(({ id, full_name }) => ({ id, full_name })), [{ id: amy.toString(), full_name: "Amy" }, { id: zed.toString(), full_name: "Zed" }]);
 });
+
+test("POST /friends/request/by-user stores a canonical pair key for the pending request", async (t) => {
+  const requester = new mongoose.Types.ObjectId();
+  const recipient = new mongoose.Types.ObjectId();
+  let created;
+  stub(t, UserProfile, "findOne", async () => ({ _id: requester }));
+  stub(t, UserProfile, "findById", () => ({ select: () => ({ lean: async () => ({ _id: recipient }) }) }));
+  stub(t, FriendConnection, "findOne", () => ({ lean: async () => null, sort() { return this; } }));
+  stub(t, FriendConnection, "create", async (doc) => { created = doc; return { ...doc, _id: new mongoose.Types.ObjectId(), created_at: "now" }; });
+  const res = response();
+  await handler("/friends/request/by-user", "post")({ auth: { uid: "uid-1" }, body: { user_id: recipient.toString() } }, res);
+  const [low, high] = [requester.toString(), recipient.toString()].sort();
+  assert.equal(res.statusCode, 201);
+  assert.equal(created.pair_key, `${low}:${high}`);
+});
+
+test("POST /friends/request/by-user maps a duplicate pending insert to 409", async (t) => {
+  const requester = new mongoose.Types.ObjectId();
+  const recipient = new mongoose.Types.ObjectId();
+  stub(t, UserProfile, "findOne", async () => ({ _id: requester }));
+  stub(t, UserProfile, "findById", () => ({ select: () => ({ lean: async () => ({ _id: recipient }) }) }));
+  stub(t, FriendConnection, "findOne", () => ({ lean: async () => null, sort() { return this; } }));
+  stub(t, FriendConnection, "create", async () => { throw Object.assign(new Error("E11000"), { code: 11000 }); });
+  const res = response();
+  await handler("/friends/request/by-user", "post")({ auth: { uid: "uid-1" }, body: { user_id: recipient.toString() } }, res);
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, "FRIEND_REQUEST_PENDING");
+});
