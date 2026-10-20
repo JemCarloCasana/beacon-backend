@@ -163,6 +163,7 @@ test("startup cannot listen when Mongo is missing or fails", async (t) => {
   for (const fail of [true, false]) {
     let listening = false, exitCode;
     await vm.runInNewContext(`${start}\nstartServer()`, {
+      assertFirebaseReady: async () => {},
       connectMongo: async () => { if (fail) throw new Error("Connection failed"); },
       runMigrations: async () => {},
       app: { listen() { listening = true; } }, PORT: 0,

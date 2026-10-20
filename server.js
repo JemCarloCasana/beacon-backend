@@ -27,6 +27,7 @@ import { getAuthMetricsSnapshot } from "./src/utils/authMetrics.js";
 import { getSosStreamMetrics } from "./src/services/sosLiveOps.js";
 import { serviceArea } from "./src/utils/serviceArea.js";
 import { createShutdownHandler } from "./src/utils/gracefulShutdown.js";
+import { assertFirebaseReady } from "./src/firebaseAdmin.js";
 
 const app = express();
 
@@ -209,6 +210,7 @@ const shutdown = createShutdownHandler({
 
 async function startServer() {
   try {
+    await assertFirebaseReady();
     await connectMongo();
     console.log("MongoDB connected");
 

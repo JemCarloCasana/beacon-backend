@@ -25,4 +25,22 @@ if (!admin.apps.length) {
   });
 }
 
+/**
+ * Proves the configured credential can actually mint an access token.
+ *
+ * A revoked or misconfigured key otherwise boots cleanly and then fails every
+ * app request with 503, which is invisible until a user reports it.
+ */
+export async function assertFirebaseReady(app = admin.app()) {
+  try {
+    const token = await app.options.credential.getAccessToken();
+    if (!token?.access_token) {
+      throw new Error("Firebase credential returned no access token");
+    }
+    return true;
+  } catch (error) {
+    throw new Error(`Firebase credential is not usable: ${error?.message ?? String(error)}`);
+  }
+}
+
 export default admin;
