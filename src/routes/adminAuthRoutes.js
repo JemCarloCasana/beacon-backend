@@ -9,6 +9,7 @@ import {
   validateAdminCreatePayload
 } from "../utils/adminAuthValidation.js";
 import { auditLog } from "../utils/auditLog.js";
+import { resolveBcryptCost } from "../utils/securityConfig.js";
 
 const router = express.Router();
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET;
@@ -100,7 +101,7 @@ router.post("/admin/auth/change-password", requireAdminAuth, async (req, res) =>
   try {
     const account = await AdminRecord.findOne({ _id: req.admin.adminId, record_type: "account" }).lean();
     if (!account || !await bcrypt.compare(current_password, account.password_hash)) return res.status(401).json({ message: "Current password is incorrect" });
-    const password_hash = await bcrypt.hash(new_password, 12);
+    const password_hash = await bcrypt.hash(new_password, resolveBcryptCost(process.env.BCRYPT_COST));
     const result = await AdminRecord.updateOne({ _id: account._id, record_type: "account", password_hash: account.password_hash, token_version: req.admin.token_version }, { $set: { password_hash, updated_at: new Date() }, $inc: { token_version: 1 } });
     if (result.matchedCount !== 1) return res.status(409).json({ message: "Account changed; sign in again" });
     return res.status(204).end();

@@ -28,6 +28,7 @@ import { getSosStreamMetrics } from "./src/services/sosLiveOps.js";
 import { serviceArea } from "./src/utils/serviceArea.js";
 import { createShutdownHandler } from "./src/utils/gracefulShutdown.js";
 import { assertFirebaseReady } from "./src/firebaseAdmin.js";
+import { resolveTrustProxyHops } from "./src/utils/securityConfig.js";
 
 const app = express();
 
@@ -84,7 +85,7 @@ const writeRateLimit = createRateLimiter({
 });
 
 // If behind a proxy (Render/Fly/Heroku/Nginx), keeps req.ip/secure correct
-app.set("trust proxy", 1);
+app.set("trust proxy", resolveTrustProxyHops(process.env.TRUST_PROXY_HOPS));
 
 // Security headers (CORP cross-origin: API serves cors-mode fetch clients,
 // including authenticated image blob loads, from other origins)

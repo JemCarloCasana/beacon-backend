@@ -7,6 +7,7 @@ import { mongoose } from "../mongo.js";
 import { auditLog } from "../utils/auditLog.js";
 import { AdminRecord, Notification, ReducedUserProfile as UserProfile } from "../models/Reduced.js";
 import { parseObjectId } from "../utils/objectId.js";
+import { resolveBcryptCost } from "../utils/securityConfig.js";
 
 const router = express.Router();
 const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -294,7 +295,7 @@ router.post(
         return res.status(422).json(buildValidationError(errors));
       }
 
-      const passwordHash = await bcrypt.hash(normalized.password, 12);
+      const passwordHash = await bcrypt.hash(normalized.password, resolveBcryptCost(process.env.BCRYPT_COST));
       const existing = await AdminRecord.findOne({ record_type: "account", email: normalized.email }).lean();
       if (existing) return res.status(409).json({ message: "Email already exists" });
       const createdAdmin = await AdminRecord.create({ record_type: "account", email: normalized.email, password_hash: passwordHash, full_name: normalized.full_name, role: normalized.role, permissions: normalized.permissions ?? (normalized.role === "admin" ? OPS_SUITE_PERMISSIONS : []), status: "active", created_at: new Date(), updated_at: new Date() });
