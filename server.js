@@ -125,13 +125,11 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 // Static eligibility data is public and does not depend on MongoDB availability.
 app.get("/service-area", (req, res) => res.json(serviceArea));
 
-app.get("/health/mongo", async (req, res) => {
-  try {
-    await connectMongo();
-    return res.json({ ok: true });
-  } catch {
+app.get("/health/mongo", (req, res) => {
+  if (!isMongoConnected()) {
     return res.status(503).json({ ok: false });
   }
+  return res.json({ ok: true });
 });
 
 app.get("/health/auth-metrics", (req, res) => {
