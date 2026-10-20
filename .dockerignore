@@ -1,0 +1,45 @@
+# Secrets - never bake these into an image layer
+.env
+.env.*
+!.env.example
+serviceAccountKey*.json
+*firebase-adminsdk*.json
+firebase-admin-key.json
+render-secrets.json
+
+# Dependencies - rebuilt inside the image, never copied from the host
+node_modules
+
+# Git & CI
+.git
+.gitignore
+.gitattributes
+.github
+
+# Logs, scratch files and local tooling artifacts
+*.log
+logs/
+.security-*.mjs
+.firebase
+coverage
+.nyc_output
+*.tmp
+*.temp
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Agent workspace scratch
+.superpowers
+.worktrees
+
+# Docs and local-only assets
+*.md
+migrations
+test
+openapi.yaml
+firebase.json
+firestore.rules
