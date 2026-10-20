@@ -1,11 +1,6 @@
-import { initializeApp, applicationDefault, getApps } from "firebase-admin/app";
-import { getMessaging } from "firebase-admin/messaging";
+import admin from "../firebaseAdmin.js";
 import { Notification, ReducedUserProfile as UserProfile } from "../models/Reduced.js";
 import { parseObjectId } from "../utils/objectId.js";
-
-if (!getApps().length) {
-  initializeApp({ credential: applicationDefault() });
-}
 
 export async function sendBroadcastPush({ broadcastId, title, body, data = {} }) {
   const result = { successCount: 0, failureCount: 0, removedTokensCount: 0 };
@@ -33,7 +28,7 @@ export async function sendBroadcastPush({ broadcastId, title, body, data = {} })
       const batch = tokens.slice(offset, offset + 500);
       stage = "send";
       try {
-        const response = await getMessaging().sendEachForMulticast({
+        const response = await admin.messaging().sendEachForMulticast({
           tokens: batch,
           notification: { title, body },
           data: Object.fromEntries(Object.entries(data).map(([key, value]) => [key, String(value)])),
