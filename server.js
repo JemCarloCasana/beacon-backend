@@ -26,6 +26,7 @@ import { createRateLimiter } from "./src/middleware/rateLimit.js";
 import { getAuthMetricsSnapshot } from "./src/utils/authMetrics.js";
 import { getSosStreamMetrics } from "./src/services/sosLiveOps.js";
 import { serviceArea } from "./src/utils/serviceArea.js";
+import { createShutdownHandler } from "./src/utils/gracefulShutdown.js";
 
 const app = express();
 
@@ -198,12 +199,20 @@ app.use((err, req, res, next) => {
 
 const PORT = Number(process.env.PORT || 3000);
 
+// Set once the HTTP server is listening; read by the shutdown handler.
+let server = null;
+
+const shutdown = createShutdownHandler({
+  getServer: () => server,
+  disconnect: disconnectMongo
+});
+
 async function startServer() {
   try {
     await connectMongo();
     console.log("MongoDB connected");
 
-    app.listen(PORT, () => {
+    return app.listen(PORT, () => {
       console.log(`API running on http://localhost:${PORT}`);
     });
   } catch (err) {
@@ -212,31 +221,18 @@ async function startServer() {
   }
 }
 
-process.once("SIGTERM", async () => {
-  try {
-    await disconnectMongo();
-  } catch {
-    // shutdown continues even if Mongo disconnect reports an issue
-  }
-});
-
-process.once("SIGINT", async () => {
-  try {
-    await disconnectMongo();
-  } catch {
-    // shutdown continues even if Mongo disconnect reports an issue
-  }
-});
+process.once("SIGTERM", () => { void shutdown("SIGTERM"); });
+process.once("SIGINT", () => { void shutdown("SIGINT"); });
 
 if (!process.env.VERCEL) {
-  startServerIfDirectRun();
+  void startServerIfDirectRun();
 }
 
-function startServerIfDirectRun() {
+async function startServerIfDirectRun() {
   const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
   const modulePath = pathToFileURL(invokedPath ?? "").href;
   if (invokedPath && import.meta.url === modulePath) {
-    startServer();
+    server = await startServer();
   }
 }
 
