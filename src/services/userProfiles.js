@@ -36,6 +36,13 @@ function normalizeEmail(email, uid) {
   return value.slice(0, 320) || `${uid}@firebase.local`;
 }
 
+// The address carried by the request, or null when the caller supplied none.
+// A missing claim must never replace a stored address with a synthetic one.
+function tokenEmail(email) {
+  const value = typeof email === "string" ? email.trim().toLowerCase() : "";
+  return value ? value.slice(0, 320) : null;
+}
+
 async function insertProfile(fields) {
   const profile = await UserProfile.create({
     firebase_uid: fields.firebase_uid,
@@ -62,10 +69,10 @@ export async function refreshProfileFromToken(decoded) {
     existingName: existing?.full_name ?? null,
     email: decoded.email,
   });
-  const email = normalizeEmail(decoded.email, uid);
+  const email = tokenEmail(decoded.email);
 
   if (existing) {
-    existing.email = email;
+    if (email) existing.email = email;
     if (!existing.full_name || /^User\s+\d+$/.test(existing.full_name)) {
       existing.full_name = fullName;
     }
@@ -91,7 +98,8 @@ export async function bootstrapProfile({ uid, email, fullName, phoneNumber, role
   const existing = await UserProfile.findOne({ firebase_uid: uid });
   if (existing) {
     assertProfileActive(existing);
-    existing.email = normalizeEmail(email, uid);
+    const resolvedEmail = tokenEmail(email);
+    if (resolvedEmail) existing.email = resolvedEmail;
     existing.full_name = fullName;
     existing.phone_number = phoneNumber ?? null;
     existing.role = role;
