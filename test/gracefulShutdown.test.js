@@ -102,3 +102,38 @@ test("a server that never closes is force exited with code 1", async () => {
 
   assert.deepEqual(exits, [1], "a stuck drain ends in a forced exit");
 });
+
+test("a disconnect that never settles is force exited with code 1", { timeout: 3000 }, async () => {
+  const server = makeServer();
+  const exits = [];
+  const shutdown = createShutdownHandler({
+    getServer: () => server,
+    disconnect: () => new Promise(() => {}),
+    exit: (code) => exits.push(code),
+    timeoutMs: 120,
+    drainMs: 20,
+    logger: makeLogger(),
+  });
+
+  await shutdown("SIGTERM");
+
+  assert.deepEqual(exits, [1], "a stuck disconnect ends in a forced exit");
+});
+
+test("a server handed over directly is drained too", async () => {
+  const server = makeServer();
+  const exits = [];
+  const shutdown = createShutdownHandler({
+    server,
+    disconnect: async () => {},
+    exit: (code) => exits.push(code),
+    timeoutMs: 500,
+    drainMs: 20,
+    logger: makeLogger(),
+  });
+
+  await shutdown("SIGTERM");
+
+  assert.equal(server.calls.close, 1, "the server is closed");
+  assert.deepEqual(exits, [0], "the shutdown completes cleanly");
+});

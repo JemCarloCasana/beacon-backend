@@ -4,10 +4,12 @@ const DEFAULT_DRAIN_MS = 3_000;
 /**
  * Builds the handler that drains the HTTP server on a shutdown signal.
  *
- * `getServer` is read at signal time so the handler can be created before the
- * server exists. `exit` and `logger` are injectable for tests.
+ * The server can be handed over directly or through `getServer`, which is read
+ * at signal time so the handler can be created before the server exists.
+ * `exit` and `logger` are injectable for tests.
  */
 export function createShutdownHandler({
+  server = null,
   getServer,
   disconnect,
   timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -22,7 +24,7 @@ export function createShutdownHandler({
     shuttingDown = true;
     logger.log(`[shutdown] ${signal} received; draining`);
 
-    const server = typeof getServer === "function" ? getServer() : null;
+    const activeServer = typeof getServer === "function" ? getServer() : server;
 
     let forced = false;
     let resolveHardExit;
@@ -36,13 +38,13 @@ export function createShutdownHandler({
       resolveHardExit();
     }, timeoutMs);
 
-    if (server) {
+    if (activeServer) {
       try {
-        server.closeIdleConnections?.();
+        activeServer.closeIdleConnections?.();
       } catch {}
       const closed = new Promise((resolve) => {
         try {
-          server.close(() => resolve());
+          activeServer.close(() => resolve());
         } catch {
           resolve();
         }
@@ -50,7 +52,7 @@ export function createShutdownHandler({
       // Long-lived streams (admin SSE) never close on their own, so cut them.
       const forceTimer = setTimeout(() => {
         try {
-          server.closeAllConnections?.();
+          activeServer.closeAllConnections?.();
         } catch {}
       }, drainMs);
 
@@ -58,12 +60,20 @@ export function createShutdownHandler({
       clearTimeout(forceTimer);
     }
 
+    // The hard timeout stays armed across the disconnect: a stuck disconnect
+    // must not leave the process hanging, which is the exact failure this
+    // handler exists to prevent.
+    if (!forced) {
+      try {
+        await Promise.race([
+          typeof disconnect === "function" ? disconnect() : Promise.resolve(),
+          hardExit
+        ]);
+      } catch {}
+    }
+
     clearTimeout(hardTimer);
     if (forced) return;
-
-    try {
-      await disconnect();
-    } catch {}
 
     logger.log("[shutdown] complete");
     exit(0);
