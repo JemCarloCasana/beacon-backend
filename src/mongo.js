@@ -14,6 +14,35 @@ export function isMongoConnected() {
   return mongoose.connection?.readyState === 1;
 }
 
+/**
+ * Runs a connection attempt with exponential backoff.
+ *
+ * A cold container must survive a database that is not accepting connections
+ * yet (a paused Atlas cluster, a slow first dial) instead of exiting and
+ * crash-looping.
+ */
+export async function connectWithRetry(connectFn, {
+  attempts = Number(process.env.MONGO_CONNECT_MAX_ATTEMPTS || 20),
+  baseDelayMs = Number(process.env.MONGO_CONNECT_BASE_DELAY_MS || 1000),
+  maxDelayMs = 15_000,
+  logger = console,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await connectFn();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) break;
+      const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+      logger.warn(`MongoDB connect attempt ${attempt}/${attempts} failed (${error?.name ?? "Error"}); retrying in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
 export async function connectMongo({ dbName, autoIndex = true, autoCreate = true } = {}) {
   const uri = getMongoUri();
   if (!uri) {
@@ -34,15 +63,15 @@ export async function connectMongo({ dbName, autoIndex = true, autoCreate = true
   if (isMongoConnected()) return mongoose.connection;
 
   try {
-    await mongoose.connect(uri, {
+    await connectWithRetry(() => mongoose.connect(uri, {
       ...(selectedDbName ? { dbName: selectedDbName } : {}),
       ...(production ? { tls: true, tlsAllowInvalidCertificates: false, tlsAllowInvalidHostnames: false } : {}),
       autoIndex,
       autoCreate,
       maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5_000,
-      connectTimeoutMS: 5_000,
-    });
+      serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 10_000),
+      connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS || 10_000),
+    }));
   } catch (err) {
     const redacted = redactMongoError(err);
     console.error("MongoDB connection failed", redacted);
