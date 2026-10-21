@@ -272,7 +272,7 @@ router.get(
 
       const filter = { record_type: "account", ...(statusFilter === "all" ? {} : { status: statusFilter }) };
       const rows = await AdminRecord.find(filter).sort({ created_at: -1 }).lean();
-      return res.json(rows.map((row) => ({ id: row._id.toString(), email: row.email, full_name: row.full_name, role: row.role, created_at: row.created_at, status: row.status })));
+      return res.json(rows.map((row) => ({ id: row._id.toString(), email: row.email, full_name: row.full_name, role: row.role, created_at: row.created_at, status: row.status, permissions: row.permissions ?? [] })));
     } catch (err) {
       console.error("GET /admin/admins error:", err); // ✅ IMPORTANT
       return res.status(500).json({ message: "Server error" });

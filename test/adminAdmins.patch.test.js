@@ -52,12 +52,12 @@ test("POST /admin/admins creates an admin account with an ObjectId string", asyn
 test("GET /admin/admins applies status filtering and keeps the public response shape", async (t) => {
   let filter;
   const id = new mongoose.Types.ObjectId();
-  const rows = [{ _id: id, email: "staff@example.com", full_name: "Staff", role: "personnel", created_at: "2026-01-01", status: "active" }];
+  const rows = [{ _id: id, email: "staff@example.com", full_name: "Staff", role: "personnel", created_at: "2026-01-01", status: "active", permissions: ["manage_sos", "view_incidents"] }];
   stub(t, AdminRecord, "find", (value) => { filter = value; return { sort: () => lean(rows) }; });
   const res = response();
   await route("/admin/admins", "get")({ query: { status: "ACTIVE" } }, res);
   assert.deepEqual(filter, { record_type: "account", status: "active" });
-  assert.deepEqual(res.body, [{ id: id.toString(), email: "staff@example.com", full_name: "Staff", role: "personnel", created_at: "2026-01-01", status: "active" }]);
+  assert.deepEqual(res.body, [{ id: id.toString(), email: "staff@example.com", full_name: "Staff", role: "personnel", created_at: "2026-01-01", status: "active", permissions: ["manage_sos", "view_incidents"] }]);
 });
 
 test("PATCH /admin/admins/:id updates normalized Mongo account fields", async (t) => {
