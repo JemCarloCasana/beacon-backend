@@ -1281,6 +1281,10 @@ components:
         status:
           type: string
           enum: [active, deactivated]
+        permissions:
+          type: array
+          items:
+            type: string
 
     AdminCreateAdminRequest:
       type: object

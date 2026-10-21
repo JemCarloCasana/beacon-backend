@@ -256,7 +256,7 @@ function validateAdminAccountPatchPayload(body) {
 
 /**
  * GET /admin/admins
- * Returns all personnel/admin accounts
+ * Returns all personnel/admin accounts, each with its granted permissions
  */
 router.get(
   "/admin/admins",
@@ -306,7 +306,7 @@ router.post(
         outcome: "created",
         details: { id: createdAdmin._id.toString() },
       });
-      return res.status(201).json({ id: createdAdmin._id.toString(), email: createdAdmin.email, full_name: createdAdmin.full_name, created_at: createdAdmin.created_at, status: createdAdmin.status, role: normalized.role });
+      return res.status(201).json({ id: createdAdmin._id.toString(), email: createdAdmin.email, full_name: createdAdmin.full_name, created_at: createdAdmin.created_at, status: createdAdmin.status, role: normalized.role, permissions: createdAdmin.permissions ?? [] });
     } catch (err) {
       if (err?.code === 11000) {
         return res.status(409).json({ message: "Email already exists" });

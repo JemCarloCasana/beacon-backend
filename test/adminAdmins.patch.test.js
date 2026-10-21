@@ -41,8 +41,8 @@ test("POST /admin/admins creates an admin account with an ObjectId string", asyn
   await route("/admin/admins", "post")({ body: { full_name: "Personnel User", email: "Personnel@example.com", password: "SecurePass1!", role: "personnel" }, admin: { adminId: id.toString() } }, res);
 
   assert.equal(res.statusCode, 201);
-  assert.deepEqual({ id: res.body.id, email: res.body.email, full_name: res.body.full_name, role: res.body.role }, {
-    id: id.toString(), email: "personnel@example.com", full_name: "Personnel User", role: "personnel",
+  assert.deepEqual({ id: res.body.id, email: res.body.email, full_name: res.body.full_name, role: res.body.role, permissions: res.body.permissions }, {
+    id: id.toString(), email: "personnel@example.com", full_name: "Personnel User", role: "personnel", permissions: [],
   });
   assert.match(createArgs.password_hash, /^\$2/);
   assert.equal(createArgs.record_type, "account");
@@ -58,6 +58,15 @@ test("GET /admin/admins applies status filtering and keeps the public response s
   await route("/admin/admins", "get")({ query: { status: "ACTIVE" } }, res);
   assert.deepEqual(filter, { record_type: "account", status: "active" });
   assert.deepEqual(res.body, [{ id: id.toString(), email: "staff@example.com", full_name: "Staff", role: "personnel", created_at: "2026-01-01", status: "active", permissions: ["manage_sos", "view_incidents"] }]);
+});
+
+test("GET /admin/admins coerces a missing permissions array to an empty array", async (t) => {
+  const id = new mongoose.Types.ObjectId();
+  const rows = [{ _id: id, email: "legacy@example.com", full_name: "Legacy", role: "personnel", created_at: "2026-01-01", status: "active" }];
+  stub(t, AdminRecord, "find", () => ({ sort: () => lean(rows) }));
+  const res = response();
+  await route("/admin/admins", "get")({ query: {} }, res);
+  assert.deepEqual(res.body[0].permissions, []);
 });
 
 test("PATCH /admin/admins/:id updates normalized Mongo account fields", async (t) => {
