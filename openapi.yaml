@@ -1304,6 +1304,10 @@ components:
         role:
           type: string
           enum: [admin, personnel]
+        permissions:
+          type: array
+          items:
+            type: string
 
     PatchMeRequest:
       type: object

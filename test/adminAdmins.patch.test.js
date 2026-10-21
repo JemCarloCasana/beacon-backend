@@ -125,6 +125,7 @@ test("POST /admin/admins defaults admin-role accounts to the ops permission suit
   await route("/admin/admins", "post")({ body: { full_name: "Admin User", email: "Admin@example.com", password: "SecurePass1!", role: "admin" }, admin: { adminId: id.toString() } }, res);
   assert.equal(res.statusCode, 201);
   assert.deepEqual(createArgs.permissions, OPS_SUITE_PERMISSIONS);
+  assert.deepEqual(res.body.permissions, OPS_SUITE_PERMISSIONS);
 });
 
 test("POST /admin/admins honors an explicit permissions array", async (t) => {
